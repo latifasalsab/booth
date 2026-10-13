@@ -1,0 +1,18 @@
+/*
+ * TEMPLATE theme. Replace "template" with your slug. Every design token for the booth lives here.
+ * Channel tokens are space-separated RGB so Tailwind can apply opacity (bg-bg/50 etc.).
+ */
+[data-booth="template"] {
+  --bg: 14 14 15;
+  --surface: 26 26 28;
+  --surface-2: 38 38 41;
+  --ink: 236 236 236;
+  --muted: 146 148 154;
+  --accent: 211 251 67;
+  --line: 255 255 255;
+  --focus: 211 251 67;
+  --nav-bg: 21 21 22;
+  --grain-opacity: .14;
+  --grid-line: .06;
+  --radius: 14px;
+}
