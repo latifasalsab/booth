@@ -11,7 +11,8 @@ import type { SoundMap } from "@/types";
 import { useCurtain } from "@/components/shared/PageCurtain";
 import { cropToPortrait, useCamera } from "../hooks/useCamera";
 import { useEmbossProgress } from "../hooks/useEmbossProgress";
-import { getFaceStrokes, isClearFace, sampleFaceStrokes, type Detail } from "../lib/faceStrokes";
+import { detectLandmarks } from "../lib/faceLandmarker";
+import { getFaceStrokes, isClearFace, sampleFaceStrokes, type Detail, type Landmark } from "../lib/faceStrokes";
 import { createHeightCanvas, hitTest, lineDeco, makeDeco, paintHeightMap, type Deco, type DecoKind } from "../lib/heightMap";
 import type { MetalKey } from "../lib/plateScene";
 import { configureSound, initEmbossSound, play } from "../lib/sound";
@@ -20,7 +21,6 @@ import CameraStage from "./CameraStage";
 import KioskPanel from "./KioskPanel";
 import PickupView from "./PickupView";
 import PlateCanvas, { type PenState, type PlateHandle, type SurfaceEvent } from "./PlateCanvas";
-import Wordmark from "./Wordmark";
 import CameraStep from "./steps/CameraStep";
 import CountdownStep from "./steps/CountdownStep";
 import EditStep from "./steps/EditStep";
@@ -60,6 +60,8 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
   const [photoUrl, setPhotoUrl] = useState<string | null>(null);
   const photoRef = useRef<HTMLCanvasElement | null>(null);
   const [uiProgress, setUiProgress] = useState(0);
+  const [analyzing, setAnalyzing] = useState(false);
+  const landmarksRef = useRef<Landmark[] | null>(null);
   const [plates, setPlates] = useState(0);
   const platesRef = useRef(0);
 
@@ -83,7 +85,7 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
   const versionRef = useRef(0);
   const penRef = useRef<PenState>({ x: 0, y: 0, on: false });
   const plateRef = useRef<PlateHandle>(null);
-  const thickness = 6 + size * 12;
+  const thickness = 4 + size * 10;
   const dataRef = useRef<{ path: LinePath | null; decos: Deco[]; thickness: number }>({ path: null, decos: [], thickness });
 
   const repaint = useCallback(
@@ -160,6 +162,7 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
 
   const acceptPhoto = useCallback((canvas: HTMLCanvasElement) => {
     photoRef.current = canvas;
+    landmarksRef.current = null;
     setPhotoUrl(canvas.toDataURL("image/jpeg", 0.92));
     setError(null);
     setStep("REVIEW");
@@ -226,15 +229,20 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
     [acceptPhoto],
   );
 
-  const continueToEtch = useCallback(() => {
+  const continueToEtch = useCallback(async () => {
     const photo = photoRef.current;
-    if (!photo) return;
-    const strokes = getFaceStrokes(photo, detail);
-    if (!isClearFace(strokes)) {
+    if (!photo || analyzing) return;
+    setAnalyzing(true);
+    setError(null);
+    const lm = await detectLandmarks(photo); // null if the model cannot load or no face is found
+    setAnalyzing(false);
+    if (stepRef.current !== "REVIEW") return;
+    landmarksRef.current = lm;
+    const strokes = getFaceStrokes(photo, detail, lm);
+    if (!lm && !isClearFace(strokes)) {
       setError(NO_FACE);
       return;
     }
-    setError(null);
     dataRef.current.path = buildSingleLine(strokes);
     dataRef.current.decos = [];
     setDecos([]);
@@ -245,15 +253,16 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
       penRef.current = { ...penRef.current, on: false };
       setStep("EDIT");
     });
-  }, [detail, etch, reduced]);
+  }, [detail, etch, reduced, analyzing]);
 
   const changeDetail = useCallback(
     (d: Detail) => {
       setDetail(d);
       const photo = photoRef.current;
       if (!photo) return;
-      const strokes = getFaceStrokes(photo, d);
-      if (isClearFace(strokes)) {
+      const lm = landmarksRef.current;
+      const strokes = getFaceStrokes(photo, d, lm);
+      if (lm || isClearFace(strokes)) {
         dataRef.current.path = buildSingleLine(strokes);
         repaint(1);
       }
@@ -384,6 +393,7 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
       setPrint(null);
       setPhotoUrl(null);
       photoRef.current = null;
+      landmarksRef.current = null;
       setDecos([]);
       setHistory([]);
       setSelectedId(null);
@@ -437,11 +447,6 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
               </div>
             )}
           </div>
-          {step === "IDLE" && (
-            <div className="pointer-events-none absolute bottom-4 left-5 lg:bottom-7 lg:left-9">
-              <Wordmark size="sm" />
-            </div>
-          )}
         </section>
 
         <aside className="h-[46dvh] shrink-0 p-2 lg:h-dvh lg:w-[calc(clamp(320px,30vw,440px)+16px)] lg:p-4 lg:pl-0" style={{ paddingBottom: "max(8px, env(safe-area-inset-bottom))" }}>
@@ -449,7 +454,7 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
             {step === "IDLE" && <IdleStep plates={plates} notice={notice} onStart={startCamera} onUpload={onUpload} />}
             {step === "CAMERA" && <CameraStep ready={camStatus === "live"} onCapture={takePhoto} onCancel={cancelCamera} />}
             {step === "COUNTDOWN" && <CountdownStep count={count} />}
-            {step === "REVIEW" && <ReviewStep error={error} onContinue={continueToEtch} onRetake={startCamera} />}
+            {step === "REVIEW" && <ReviewStep error={error} busy={analyzing} onContinue={continueToEtch} onRetake={startCamera} />}
             {step === "ETCH" && <EtchStep progress={uiProgress} />}
             {(step === "EDIT" || step === "PRINT") && (
               <EditStep

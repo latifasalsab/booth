@@ -21,6 +21,7 @@ export const etchedConfig: BoothConfig = {
     { label: "Policy", href: "/etched/policy" },
     { label: "About", href: "/etched/about" },
   ],
+  grain: { pattern: "stripes" },
   fontClassName: `${ui.variable} ${display.variable} ${dot.variable}`,
   sound: {
     shutter: "/sounds/shutter.mp3",

@@ -18,6 +18,12 @@
   --grid-line: .07;
   --radius: 14px;
 
+  /* Background stripes (135deg), faded toward the plate area; slow drift */
+  --stripes: repeating-linear-gradient(135deg, rgba(255,255,255,.035) 0 1px, transparent 1px 14px);
+  --stripes-mask: radial-gradient(ellipse 46% 52% at 36% 52%, rgba(0,0,0,.12) 0%, #000 100%);
+  --stripes-drift: 59.4px;
+  --stripes-duration: 90s;
+
   /* Palette */
   --charcoal: #0e0e0f;
   --graphite: #1a1a1c;
@@ -36,6 +42,10 @@
   --steel-2: #b9bcc2;
   --screen-1: #858aa0;
   --screen-2: #a0a5b8;
+}
+
+@media (max-width: 1023px) {
+  [data-booth="etched"] { --stripes-mask: radial-gradient(ellipse 70% 38% at 50% 30%, rgba(0,0,0,.12) 0%, #000 100%); }
 }
 
 /* ---------- Wordmark: glossy embossed silver ---------- */
@@ -73,12 +83,12 @@
 }
 [data-booth="etched"] .kiosk-screen :focus-visible,
 [data-booth="etched"] .pickup-bg :focus-visible { outline: 2px solid #17181a; outline-offset: 2px; }
-[data-booth="etched"] .kiosk-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 16px 18px 12px; }
+[data-booth="etched"] .kiosk-head { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 16px 18px 12px; }
 [data-booth="etched"] .kiosk-sound { padding: 3px 6px; border-radius: 6px; }
 [data-booth="etched"] .kiosk-sound:hover { background: rgba(255,255,255,.3); }
 [data-booth="etched"] .groove-line { margin: 0 14px; border-top: var(--groove); box-shadow: 0 1px 0 rgba(255,255,255,.55); }
-[data-booth="etched"] .kiosk-foot { display: flex; align-items: center; gap: 10px; padding: 12px 14px 14px; }
-[data-booth="etched"] .kiosk-base { display: flex; flex-direction: column; gap: 8px; padding: 10px 14px 14px; align-items: flex-start; }
+[data-booth="etched"] .kiosk-foot { flex: none; position: relative; z-index: 3; display: flex; align-items: center; gap: 10px; padding: 12px 14px 14px; }
+[data-booth="etched"] .kiosk-base { flex: none; display: flex; flex-direction: column; gap: 8px; padding: 10px 14px 14px; align-items: flex-start; }
 [data-booth="etched"] .serial {
   padding: 3px 10px; border-radius: 6px; border: var(--groove); font-size: 11px; letter-spacing: .14em; color: #3a3d45;
   background: linear-gradient(180deg, rgba(0,0,0,.06), rgba(255,255,255,.12)); text-shadow: var(--engrave);
@@ -105,8 +115,34 @@
     repeating-linear-gradient(90deg, rgba(0,0,0,.03) 0 1px, transparent 1px 3px),
     radial-gradient(120% 100% at 50% 50%, transparent 55%, rgba(0,0,0,.28));
 }
-[data-booth="etched"] .lcd-scroll { position: relative; z-index: 1; height: 100%; overflow-y: auto; padding: 16px; }
-@media (max-width: 1023px) { [data-booth="etched"] .lcd-scroll { padding: 12px; } }
+[data-booth="etched"] .scroll-wrap { position: relative; z-index: 1; height: 100%; }
+[data-booth="etched"] .lcd-scroll { height: 100%; overflow-y: auto; overscroll-behavior: contain; padding: 16px; }
+[data-booth="etched"] .scroll-fade {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 var(--fade-t), #000 calc(100% - var(--fade-b)), transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 var(--fade-t), #000 calc(100% - var(--fade-b)), transparent 100%);
+  transition: --fade-t 200ms linear, --fade-b 200ms linear;
+}
+/* slim steel scrollbar (3px thumb) */
+[data-booth="etched"] .lcd-scroll::-webkit-scrollbar { width: 3px; }
+[data-booth="etched"] .lcd-scroll::-webkit-scrollbar-track { background: rgba(0,0,0,.1); }
+[data-booth="etched"] .lcd-scroll::-webkit-scrollbar-thumb { background: #4b4f5b; border-radius: 3px; }
+@supports not selector(::-webkit-scrollbar) { [data-booth="etched"] .lcd-scroll { scrollbar-width: thin; scrollbar-color: #4b4f5b transparent; } }
+[data-booth="etched"] .scroll-hint { position: absolute; left: 0; right: 0; bottom: 10px; z-index: 3; display: flex; justify-content: center; pointer-events: none; opacity: 0; transition: opacity 250ms ease-out; }
+[data-booth="etched"] .scroll-hint[data-show="true"] { opacity: .95; }
+[data-booth="etched"] .scroll-pill {
+  display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px 4px 12px; border-radius: 9999px; font-size: 11px; letter-spacing: .14em;
+  background: #17181a; color: #ececec; box-shadow: 0 2px 6px rgba(0,0,0,.35); animation: etb-float 1.6s ease-in-out infinite alternate;
+}
+[data-booth="etched"] .scroll-pill svg { color: rgb(var(--accent)); }
+@keyframes etb-float { from { transform: translateY(0); } to { transform: translateY(-3px); } }
+@media (prefers-reduced-motion: reduce) { [data-booth="etched"] .scroll-pill { animation: none; } }
+@media (max-width: 1023px) {
+  [data-booth="etched"] .lcd-scroll { padding: 12px; }
+  [data-booth="etched"] .kiosk-head { padding: 12px 16px 8px; }
+  [data-booth="etched"] .kiosk-foot { padding: 10px 12px 10px; }
+  [data-booth="etched"] .kiosk-base { flex-direction: row; align-items: center; gap: 10px; padding: 6px 14px 10px; }
+  [data-booth="etched"] .grille { flex: 1; width: auto; height: 14px; }
+}
 [data-booth="etched"] .notice {
   padding: 8px 10px; border-radius: 8px; font-size: 12px; line-height: 1.35; background: #17181a; color: #ececec;
 }
@@ -178,6 +214,7 @@
 [data-booth="etched"] .etb-range::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%; background: linear-gradient(180deg,#eceef1,#aeb1b8); border: 1px solid rgba(0,0,0,.5); }
 
 /* ---------- Pickup view and print ---------- */
+/* Print geometry (percent of the 1800x1200 paper) must match lib/exportPrint.ts: 72px margins, 796px columns, 64px gap, 958px image height. */
 [data-booth="etched"] .pickup-bg { background: var(--steel-grain), var(--steel-face); color: #2b2d33; text-shadow: var(--engrave); }
 [data-booth="etched"] .pickup-slot {
   position: relative; z-index: 1; width: var(--slot-w, 640px); max-width: calc(100vw - 32px); padding: 11px; border-radius: 24px;
@@ -190,25 +227,44 @@
   box-shadow: inset 0 4px 8px rgba(0,0,0,.8), 0 1px 0 rgba(255,255,255,.55);
 }
 [data-booth="etched"] .pickup-label {
-  position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); margin-bottom: 14px; white-space: nowrap;
-  display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 12px; letter-spacing: .16em; color: #3a3d45;
+  margin-bottom: 14px; display: flex; flex-direction: column; align-items: center; gap: 2px; white-space: nowrap;
+  font-size: 12px; letter-spacing: .16em; color: #3a3d45;
 }
 [data-booth="etched"] .print-paper {
-  container-type: inline-size; background: #f6f6f4; text-shadow: none;
+  container-type: inline-size; text-shadow: none;
+  background: linear-gradient(115deg, #f6f3ec 0%, #faf8f3 55%, #f6f3ed 100%);
   box-shadow: 0 1px 1px rgba(0,0,0,.2), 0 10px 24px -12px rgba(0,0,0,.4);
 }
-[data-booth="etched"] .print-photo { position: absolute; left: 11.111%; top: 10.833%; width: 35.556%; height: 66.667%; object-fit: cover; box-shadow: 0 1px 2px rgba(0,0,0,.25); }
-[data-booth="etched"] .print-plate { position: absolute; left: 53.333%; top: 10.833%; width: 35.556%; height: 66.667%; object-fit: contain; filter: drop-shadow(0 1px 1px rgba(0,0,0,.4)) drop-shadow(0 8px 10px rgba(0,0,0,.28)); }
-[data-booth="etched"] .print-word { position: absolute; left: 0; right: 0; top: 79%; display: flex; justify-content: center; }
+[data-booth="etched"] .print-content { position: absolute; inset: 0; }
+[data-booth="etched"] .print-photo { position: absolute; left: 4%; top: 6%; width: 44.2222%; height: 79.8333%; object-fit: cover; object-position: 50% 35%; box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+[data-booth="etched"] .print-plate { position: absolute; left: 51.7778%; top: 6%; width: 44.2222%; height: 79.8333%; object-fit: contain; filter: drop-shadow(0 1px 1px rgba(0,0,0,.4)) drop-shadow(0 8px 10px rgba(0,0,0,.28)); }
+[data-booth="etched"] .print-word { position: absolute; left: 0; right: 0; display: flex; justify-content: center; }
+/* coated-paper finish: faint inner edge highlight + very subtle paper curl shadow (no grain) */
+[data-booth="etched"] .print-finish {
+  position: absolute; inset: 0; pointer-events: none;
+  background:
+    linear-gradient(90deg, rgba(0,0,0,.05), transparent 3.5%, transparent 96.5%, rgba(0,0,0,.06)),
+    linear-gradient(180deg, rgba(0,0,0,.035), transparent 4%, transparent 95%, rgba(0,0,0,.05));
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.7), inset 0 0 18px rgba(255,255,255,.3);
+}
+[data-booth="etched"] .print-sheen-clip { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+[data-booth="etched"] .print-sheen {
+  position: absolute; inset: 0; mix-blend-mode: screen; will-change: transform;
+  background: linear-gradient(115deg, rgba(255,255,255,0) 15%, rgba(255,255,255,.5) 25%, rgba(255,255,255,0) 35%);
+}
 
 /* ---------- About / Policy pages ---------- */
-[data-booth="etched"] .engraved-panel {
-  background: rgb(14 14 15 / .92);
-  border: 1px solid rgb(var(--line) / .1);
-  border-radius: var(--radius);
-  box-shadow: inset 0 1px 0 rgb(var(--line) / .06), 0 20px 40px -24px rgb(0 0 0 / .8);
-  text-shadow: 0 -1px 0 rgb(0 0 0 / .6), 0 1px 0 rgb(var(--line) / .06);
-}
+/* Shared typography (About + Policy): Doto only for labels, Anton for the page title, Plus Jakarta Sans for the rest */
+[data-booth="etched"] .t-label { font-family: var(--font-dot), ui-monospace, monospace; font-size: 12px; line-height: 1.2; letter-spacing: .18em; text-transform: uppercase; }
+[data-booth="etched"] .t-title { font-family: var(--font-display), Impact, sans-serif; font-size: clamp(44px, 7vw, 84px); line-height: .95; font-weight: 400; }
+[data-booth="etched"] .t-lead { font-family: var(--font-ui), system-ui, sans-serif; font-size: clamp(18px, 2vw, 22px); line-height: 1.45; font-weight: 500; }
+[data-booth="etched"] .t-point { font-family: var(--font-ui), system-ui, sans-serif; font-size: clamp(22px, 3vw, 30px); line-height: 1.15; font-weight: 600; letter-spacing: -.01em; }
+[data-booth="etched"] .t-sub { font-family: var(--font-ui), system-ui, sans-serif; font-size: clamp(17px, 2vw, 19px); line-height: 1.3; font-weight: 600; }
+[data-booth="etched"] .t-body { font-family: var(--font-ui), system-ui, sans-serif; font-size: 16px; line-height: 1.65; font-weight: 400; }
+
+/* Steel content panel (use together with .kiosk-screen): dark engraved text, dark hairline grooves */
+[data-booth="etched"] .steel-panel { --ink: 35 37 43; --muted: 64 67 76; --line: 0 0 0; --focus: 23 24 26; }
+[data-booth="etched"] .steel-panel .acc-btn:hover .acc-title { text-decoration-color: #17181a; }
 [data-booth="etched"] .icon-box {
   display: grid; place-items: center; flex: none; width: 48px; height: 48px; border-radius: 12px;
   color: rgb(var(--ink)); background: rgb(var(--line) / .05); border: 1px solid rgb(var(--line) / .12);
@@ -256,3 +312,7 @@
   display: inline-block; padding: 5px 12px; border-radius: 9999px; font-family: var(--font-dot), monospace; font-size: 12px; letter-spacing: .08em;
   color: rgb(var(--muted)); border: 1px solid rgb(var(--line) / .12);
 }
+
+/* animatable mask-fade lengths for the kiosk scroll area */
+@property --fade-t { syntax: "<length>"; inherits: false; initial-value: 0px; }
+@property --fade-b { syntax: "<length>"; inherits: false; initial-value: 0px; }

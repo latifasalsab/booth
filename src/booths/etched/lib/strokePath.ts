@@ -14,7 +14,21 @@ export interface LinePath {
   shallow: boolean[];
   cum: number[];
   total: number;
+  /** Stroke width of each segment in working pixels (768 px wide image); connectors use CONNECTOR_W. */
+  w: number[];
 }
+
+export type StrokeKind = "silhouette" | "boundary" | "face" | "brow" | "eye" | "glasses" | "nose" | "lips" | "hair";
+/** A stroke with its role and width (working px). wm = optional per-point width multiplier. */
+export interface TStroke {
+  pts: Pt[];
+  kind: StrokeKind;
+  w: number;
+  wm?: number[];
+}
+/** Drawing order of the single continuous line. */
+export const KIND_ORDER: StrokeKind[] = ["silhouette", "boundary", "face", "brow", "eye", "glasses", "nose", "lips", "hair"];
+export const CONNECTOR_W = 7;
 
 /** Plate width / height. Distances multiply x by this so they are isotropic. */
 export const ASPECT = 0.8;
@@ -98,27 +112,90 @@ export function orderStrokes(strokes: Stroke[]): Stroke[] {
   return out;
 }
 
+const isClosed = (pts: Pt[]): boolean => pts.length > 3 && dist(pts[0], pts[pts.length - 1]) < 0.006;
+
+/** Order strokes by KIND_ORDER; inside a kind, nearest-neighbor from the pen position (closed loops may start anywhere). */
+export function orderTagged(strokes: TStroke[]): TStroke[] {
+  const out: TStroke[] = [];
+  let cur: Pt = { x: 0.5, y: 0 };
+  for (const kind of KIND_ORDER) {
+    const group = strokes.filter((s) => s.kind === kind && s.pts.length > 1).map((s) => ({ ...s, pts: s.pts.slice(), wm: s.wm?.slice() }));
+    while (group.length) {
+      let bi = 0;
+      let bj = 0;
+      let bd = Infinity;
+      let rev = false;
+      group.forEach((s, i) => {
+        if (isClosed(s.pts)) {
+          s.pts.forEach((p, j) => {
+            const d = dist(cur, p);
+            if (d < bd) [bd, bi, bj, rev] = [d, i, j, false];
+          });
+        } else {
+          const d0 = dist(cur, s.pts[0]);
+          const d1 = dist(cur, s.pts[s.pts.length - 1]);
+          if (d0 < bd) [bd, bi, bj, rev] = [d0, i, 0, false];
+          if (d1 < bd) [bd, bi, bj, rev] = [d1, i, 0, true];
+        }
+      });
+      const s = group.splice(bi, 1)[0];
+      if (bj > 0 && isClosed(s.pts)) {
+        const core = s.pts.slice(0, -1);
+        s.pts = [...core.slice(bj), ...core.slice(0, bj)];
+        s.pts.push(s.pts[0]);
+        if (s.wm) {
+          const wc = s.wm.slice(0, -1);
+          s.wm = [...wc.slice(bj), ...wc.slice(0, bj)];
+          s.wm.push(s.wm[0]);
+        }
+      }
+      if (rev) {
+        s.pts.reverse();
+        s.wm?.reverse();
+      }
+      out.push(s);
+      cur = s.pts[s.pts.length - 1];
+    }
+  }
+  return out;
+}
+
 /** Join ordered strokes into one path with short, shallow connectors between them. */
-export function buildSingleLine(ordered: Stroke[]): LinePath {
+export function buildLine(ordered: TStroke[]): LinePath {
   const pts: Pt[] = [];
   const shallow: boolean[] = [];
-  const push = (p: Pt, flag: boolean) => {
-    if (pts.length) shallow.push(flag);
+  const w: number[] = [];
+  const push = (p: Pt, flag: boolean, width: number) => {
+    if (pts.length) {
+      shallow.push(flag);
+      w.push(width);
+    }
     pts.push(p);
   };
   for (const s of ordered) {
-    if (s.length < 2) continue;
+    if (s.pts.length < 2) continue;
     if (pts.length) {
       const a = pts[pts.length - 1];
-      const n = Math.max(2, Math.ceil(dist(a, s[0]) / 0.05));
-      for (let k = 1; k <= n; k++) push(lerp(a, s[0], k / n), true);
-    } else push(s[0], false);
-    for (let i = 1; i < s.length; i++) push(s[i], false);
+      const n = Math.max(2, Math.ceil(dist(a, s.pts[0]) / 0.05));
+      for (let k = 1; k <= n; k++) push(lerp(a, s.pts[0], k / n), true, CONNECTOR_W);
+    } else push(s.pts[0], false, 0);
+    for (let i = 1; i < s.pts.length; i++) push(s.pts[i], false, s.w * (s.wm ? (s.wm[i - 1] + s.wm[i]) / 2 : 1));
   }
   const cum: number[] = [0];
   for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + dist(pts[i - 1], pts[i]));
-  return { pts, shallow, cum, total: cum[cum.length - 1] || 0 };
+  return { pts, shallow, cum, total: cum[cum.length - 1] || 0, w };
 }
+
+/** Plain strokes (no roles) joined into one path with a uniform width. */
+export function buildSingleLine(ordered: Stroke[], width = 9): LinePath {
+  return buildLine(ordered.map((pts) => ({ pts, kind: "face" as const, w: width })));
+}
+
+/** Etch duration: 5 s for short paths up to 8 s for long, detailed ones. */
+export function etchDuration(path: LinePath): number {
+  return clampMs(5000 + (path.total - 5) * 500);
+}
+const clampMs = (v: number) => Math.min(8000, Math.max(5000, v));
 
 /** Position at fraction t (0..1) along the path. */
 export function pointAt(path: LinePath, t: number): Pt {

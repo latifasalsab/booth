@@ -1,12 +1,17 @@
 /**
- * Height map painter. Draws the etched line (up to a progress value) and user decorations into a
+ * Height map painter. Draws layered relief, the etched line (up to a progress value) and user decorations into a
  * grayscale canvas: black = flat, white = raised. Each stroke is painted in several passes with
  * shrinking width and rising brightness to get a thick, rounded pressed-wire cross-section.
  */
+import { clamp } from "./raster";
 import type { LinePath, Pt } from "./strokePath";
 
 export const HW = 448;
 export const HH = 560;
+/** Analysis (working) size. Stroke widths are specified in working pixels and scaled to the height canvas. */
+export const WORK_W = 768;
+export const WORK_H = 960;
+export const WIDTH_SCALE = HW / WORK_W;
 
 export type DecoKind = "star" | "flower" | "heart" | "snowflake" | "text" | "line";
 
@@ -145,30 +150,6 @@ function strokePoly(ctx: CanvasRenderingContext2D, pts: Pt[]) {
   ctx.stroke();
 }
 
-function paintPath(ctx: CanvasRenderingContext2D, path: LinePath, progress: number, thickness: number) {
-  const target = path.total * Math.min(1, Math.max(0, progress));
-  const n = path.pts.length;
-  if (target <= 0 || n < 2) return;
-  let i = 0;
-  while (i < n - 1 && path.cum[i] < target) {
-    const flag = path.shallow[i];
-    const run: Pt[] = [path.pts[i]];
-    while (i < n - 1 && path.shallow[i] === flag && path.cum[i] < target) {
-      const a = path.pts[i];
-      const b = path.pts[i + 1];
-      if (path.cum[i + 1] <= target) {
-        run.push(b);
-        i++;
-      } else {
-        const f = (target - path.cum[i]) / (path.cum[i + 1] - path.cum[i]);
-        run.push({ x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f });
-        i = n;
-      }
-    }
-    if (run.length > 1) profile(ctx, flag ? thickness * 0.45 : thickness, flag ? 0.16 : 1, () => strokePoly(ctx, run));
-  }
-}
-
 function paintDeco(ctx: CanvasRenderingContext2D, d: Deco, thickness: number) {
   if (d.kind === "text" && d.text) {
     ctx.font = `800 ${TEXT_FONT_PX}px "Arial Black", Impact, sans-serif`;
@@ -180,17 +161,109 @@ function paintDeco(ctx: CanvasRenderingContext2D, d: Deco, thickness: number) {
   for (const pl of decoPolylines(d)) if (pl.length > 1) profile(ctx, thickness, 1, () => strokePoly(ctx, pl));
 }
 
-/** Repaint the whole height map. progress applies to the portrait line only. */
-export function paintHeightMap(canvas: HTMLCanvasElement, path: LinePath | null, progress: number, decos: Deco[], thickness: number) {
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-  ctx.globalCompositeOperation = "source-over";
-  ctx.fillStyle = "#000";
-  ctx.fillRect(0, 0, HW, HH);
-  ctx.globalCompositeOperation = "lighten";
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  if (path) paintPath(ctx, path, progress, thickness);
-  for (const d of decos) paintDeco(ctx, d, thickness);
-  ctx.globalCompositeOperation = "source-over";
+/**
+ * Composes the height map from layers: relief base (clothes / hair plateau / skin, from analysis.buildRelief) +
+ * the etched line (incremental, so the animation only draws new segments) + user decorations. Segment widths come
+ * from the path (working px); sizeK scales them (Size slider).
+ */
+export class HeightPainter {
+  path: LinePath | null = null;
+  private base: HTMLCanvasElement | null = null;
+  private strokes: HTMLCanvasElement | null = null;
+  private dirty = true;
+  private drawn = 0;
+  private seg = 0;
+  private sizeK = 1;
+
+  setBase(c: HTMLCanvasElement | null) {
+    this.base = c;
+  }
+  setPath(p: LinePath | null) {
+    this.path = p;
+    this.dirty = true;
+  }
+  setSizeK(k: number) {
+    if (Math.abs(k - this.sizeK) > 1e-6) {
+      this.sizeK = k;
+      this.dirty = true;
+    }
+  }
+
+  private strokeCtx(): CanvasRenderingContext2D | null {
+    if (!this.strokes) {
+      this.strokes = document.createElement("canvas");
+      this.strokes.width = HW;
+      this.strokes.height = HH;
+      this.dirty = true;
+    }
+    const ctx = this.strokes.getContext("2d");
+    if (ctx && this.dirty) {
+      ctx.globalCompositeOperation = "source-over";
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, HW, HH);
+      this.dirty = false;
+      this.drawn = 0;
+      this.seg = 0;
+    }
+    return ctx;
+  }
+
+  private drawTo(progress: number) {
+    const path = this.path;
+    if (!path || path.pts.length < 2) return;
+    let ctx = this.strokeCtx();
+    if (!ctx) return;
+    const total = path.total * clamp(progress, 0, 1);
+    if (total < this.drawn - 1e-9) {
+      this.dirty = true;
+      ctx = this.strokeCtx();
+      if (!ctx) return;
+    }
+    if (total <= this.drawn) return;
+    ctx.globalCompositeOperation = "lighten";
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    const n = path.pts.length;
+    let i = this.seg;
+    while (i < n - 2 && path.cum[i + 1] <= this.drawn) i++;
+    for (; i < n - 1 && path.cum[i] < total; i++) {
+      const len = path.cum[i + 1] - path.cum[i];
+      if (len <= 0) continue;
+      const t0 = Math.max(0, (this.drawn - path.cum[i]) / len);
+      const t1 = Math.min(1, (total - path.cum[i]) / len);
+      const a = path.pts[i];
+      const b = path.pts[i + 1];
+      const x0 = (a.x + (b.x - a.x) * t0) * HW;
+      const y0 = (a.y + (b.y - a.y) * t0) * HH;
+      const x1 = (a.x + (b.x - a.x) * t1) * HW;
+      const y1 = (a.y + (b.y - a.y) * t1) * HH;
+      const shallow = path.shallow[i];
+      const width = path.w[i] * WIDTH_SCALE * this.sizeK * (shallow ? 0.45 : 1);
+      profile(ctx, width, shallow ? 0.16 : 1, () => {
+        ctx?.beginPath();
+        ctx?.moveTo(x0, y0);
+        ctx?.lineTo(x1, y1);
+        ctx?.stroke();
+      });
+      this.seg = i;
+    }
+    this.drawn = total;
+  }
+
+  /** Repaint target: base layer, etched line up to progress (0..1), then decorations (decoWidth in canvas px). */
+  paint(target: HTMLCanvasElement, progress: number, decos: Deco[], decoWidth: number) {
+    const ctx = target.getContext("2d");
+    if (!ctx) return;
+    ctx.globalCompositeOperation = "source-over";
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, HW, HH);
+    if (this.base) ctx.drawImage(this.base, 0, 0);
+    this.drawTo(progress);
+    ctx.globalCompositeOperation = "lighten";
+    if (this.strokes && this.path) ctx.drawImage(this.strokes, 0, 0);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    for (const d of decos) paintDeco(ctx, d, decoWidth);
+    ctx.globalCompositeOperation = "source-over";
+  }
 }

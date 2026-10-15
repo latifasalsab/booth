@@ -10,7 +10,7 @@ import Reveal from "@/components/shared/Reveal";
 import { ABOUT_LABEL, ABOUT_TAGLINE } from "../../content/about";
 import { cropToPortrait } from "../../hooks/useCamera";
 import { useEmbossProgress } from "../../hooks/useEmbossProgress";
-import { getFaceStrokes, isClearFace, sampleFaceStrokes } from "../../lib/faceStrokes";
+import { getFaceStrokesAsync, isClearFace, sampleFaceStrokes } from "../../lib/faceStrokes";
 import { createHeightCanvas, paintHeightMap } from "../../lib/heightMap";
 import { buildSingleLine, pointAt, type LinePath } from "../../lib/strokePath";
 import PlateCanvas, { type PenState } from "../PlateCanvas";
@@ -31,7 +31,7 @@ export default function AboutHero({ portraitSrc }: { portraitSrc: string | null 
   const repaint = useCallback(
     (p: number) => {
       if (!heightCanvas) return;
-      paintHeightMap(heightCanvas, pathRef.current, p, [], 12);
+      paintHeightMap(heightCanvas, pathRef.current, p, [], 9);
       versionRef.current++;
     },
     [heightCanvas],
@@ -63,9 +63,10 @@ export default function AboutHero({ portraitSrc }: { portraitSrc: string | null 
       };
     }
     const img = new Image();
-    img.onload = () => {
+    img.onload = async () => {
       if (!alive) return;
-      const strokes = getFaceStrokes(cropToPortrait(img, img.naturalWidth, img.naturalHeight), "low");
+      const strokes = await getFaceStrokesAsync(cropToPortrait(img, img.naturalWidth, img.naturalHeight), "low");
+      if (!alive) return;
       if (isClearFace(strokes)) {
         pathRef.current = buildSingleLine(strokes);
         repaint(0);
@@ -96,13 +97,13 @@ export default function AboutHero({ portraitSrc }: { portraitSrc: string | null 
     <section className="mx-auto grid max-w-6xl items-center gap-8 px-5 pb-12 pt-28 lg:min-h-[92dvh] lg:grid-cols-2">
       <div>
         <Reveal>
-          <p className="font-dot text-[12px] tracking-[.18em] text-muted">{ABOUT_LABEL}</p>
+          <p className="t-label text-muted">{ABOUT_LABEL}</p>
         </Reveal>
         <Reveal delay={0.07} className="mt-4">
           <Wordmark size="inherit" style={{ fontSize: "clamp(52px, 6.4vw, 92px)" }} />
         </Reveal>
         <Reveal delay={0.14}>
-          <p className="mt-6 max-w-md text-lg leading-snug text-ink/90">{ABOUT_TAGLINE}</p>
+          <p className="t-lead mt-6 max-w-md text-ink/90">{ABOUT_TAGLINE}</p>
         </Reveal>
       </div>
       <motion.div ref={stageRef} style={{ y }} className="relative mx-auto h-[min(66dvh,620px)] w-full max-w-[520px]">

@@ -8,7 +8,7 @@ export default function MakerNote() {
     <section className="relative mx-auto max-w-3xl px-5 py-14">
       <Hallmark className="absolute right-5 top-8" />
       <Reveal>
-        <p className="pr-20 text-[clamp(20px,2.4vw,28px)] leading-snug text-ink">{MAKER_NOTE}</p>
+        <p className="t-lead pr-20 text-ink">{MAKER_NOTE}</p>
       </Reveal>
       <Reveal delay={0.08}>
         <ul className="mt-8 flex flex-wrap gap-2">

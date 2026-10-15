@@ -4,11 +4,12 @@ import { KioskDisplay, KioskFooter } from "../KioskPanel";
 
 interface Props {
   error: string | null;
+  busy?: boolean;
   onContinue: () => void;
   onRetake: () => void;
 }
 
-export default function ReviewStep({ error, onContinue, onRetake }: Props) {
+export default function ReviewStep({ error, busy = false, onContinue, onRetake }: Props) {
   return (
     <>
       <KioskDisplay>
@@ -21,10 +22,10 @@ export default function ReviewStep({ error, onContinue, onRetake }: Props) {
         )}
       </KioskDisplay>
       <KioskFooter>
-        <SteelButton led={!error} onClick={onContinue} className="flex-1">
-          Looks good? Continue
+        <SteelButton led={!error} disabled={busy} onClick={onContinue} className="flex-1">
+          {busy ? "Reading your face…" : "Looks good? Continue"}
         </SteelButton>
-        <SteelButton variant="ghost" onClick={onRetake}>
+        <SteelButton variant="ghost" disabled={busy} onClick={onRetake}>
           Retake
         </SteelButton>
       </KioskFooter>

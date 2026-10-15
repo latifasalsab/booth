@@ -1,113 +1,238 @@
 /**
- * Photo -> few, bold, firm strokes. Isolated on purpose: getFaceStrokes(canvas) is the only entry point,
- * so a landmark model can replace it without touching the rest of the booth.
- *
- * TODO(MediaPipe): replace the edge pipeline below with MediaPipe Face Landmarker. Build strokes from
- * the face oval, brows, eyes, nose and lips landmark contours and return them as Stroke[] (normalized 0..1).
+ * Photo -> strokes that reflect THIS person. buildPortrait(analysis, settings) combines, from the cached analysis:
+ * silhouette (head and shoulders, hair or head covering), face boundary (hairline / head-covering opening), the lower
+ * face outline, brows, eyes, irises, nose and lips from MediaPipe landmarks (light smoothing, width varies with local
+ * edge strength), glasses (lib/glasses.ts), hair and fold strokes (lib/hairStrokes.ts) and, at Max, extra edge strokes
+ * inside the face. Without landmarks it falls back to the plain edge pipeline; without segmentation it adds edge
+ * strokes inside an enlarged face region ("basic mode"). Output is ordered and joined into ONE continuous path.
  */
-import { ASPECT, chaikin, orderStrokes, simplify, strokeLength, type Pt, type Stroke } from "./strokePath";
+import { buildRelief, type Analysis } from "./analysis";
+import { contours, dropNearDuplicates, pixelLength, splitAtBorder } from "./contours";
+import { detectGlasses, glassesStrokes, type GlassesMode } from "./glasses";
+import { hairStrokes } from "./hairStrokes";
+import { FACE_OVAL, IRISES, LEFT_EYE, LEFT_EYEBROW, LIPS_INNER, LIPS_OUTER, NOSE_BASE, NOSE_BRIDGE, RIGHT_EYE, RIGHT_EYEBROW } from "./landmarkIndices";
+import { clamp, thin, trace } from "./raster";
+import { buildLine, chaikin, orderStrokes, orderTagged, simplify, strokeLength, type LinePath, type Pt, type Stroke, type TStroke } from "./strokePath";
 
-export type Detail = "low" | "medium" | "high";
+export type Detail = "simple" | "detailed" | "max";
+export type { GlassesMode };
+export interface Landmark {
+  x: number;
+  y: number;
+}
+export interface PortraitSettings {
+  detail: Detail;
+  glasses: GlassesMode;
+  hair: boolean;
+}
+export const DEFAULT_SETTINGS: PortraitSettings = { detail: "detailed", glasses: "auto", hair: true };
+export const MODE_NOTE = "Detailed mode unavailable, using basic mode";
 
-const AW = 160;
-const AH = 200;
-const SETTINGS: Record<Detail, { keep: number; pct: number; minLen: number }> = {
-  low: { keep: 12, pct: 0.07, minLen: 18 },
-  medium: { keep: 16, pct: 0.11, minLen: 15 },
-  high: { keep: 20, pct: 0.16, minLen: 12 },
-};
-/** Minimum edge strength (gray levels per pixel) that counts as a real edge. */
-const MIN_EDGE = 9;
+export interface PortraitInfo {
+  glasses: boolean;
+  glassesScore: number;
+  hairStrokes: number;
+  extraStrokes: number;
+  model: "ok" | "fallback";
+  counts: Record<string, number>;
+}
+export interface Portrait {
+  ok: boolean;
+  strokes: TStroke[];
+  path: LinePath;
+  base: HTMLCanvasElement | null;
+  info: PortraitInfo;
+}
 
-function boxBlur(src: Float32Array, w: number, h: number): Float32Array {
-  const out = new Float32Array(src.length);
-  for (let y = 0; y < h; y++)
-    for (let x = 0; x < w; x++) {
+// stroke widths in working pixels (768 px wide)
+const W_SILHOUETTE = 9;
+const W_FEATURE = 6;
+const W_EXTRA = 5;
+const W_HAIR = 3.5;
+
+const lerp = (a: Pt, b: Pt, t: number): Pt => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+
+/** Chaikin for closed loops (wraps around), returned closed. */
+function smoothClosed(pts: Pt[], iterations = 1): Stroke {
+  let p = pts;
+  for (let it = 0; it < iterations; it++) {
+    const out: Pt[] = [];
+    for (let i = 0; i < p.length; i++) out.push(lerp(p[i], p[(i + 1) % p.length], 0.25), lerp(p[i], p[(i + 1) % p.length], 0.75));
+    p = out;
+  }
+  return [...p, p[0]];
+}
+
+const hasLandmarks = (an: Analysis): Landmark[] | null => (an.landmarks && an.landmarks.length >= 468 ? an.landmarks : null);
+
+// ---------------------------------------------------------------- landmark features
+function featureStrokes(an: Analysis, lm: Landmark[]): TStroke[] {
+  const { W, H } = an;
+  const at = (i: number): Pt => ({ x: lm[i].x, y: lm[i].y });
+  const magAt = (p: Pt) => {
+    const x = Math.round(p.x * W);
+    const y = Math.round(p.y * H);
+    let m = 0;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) m = Math.max(m, an.mag[clamp(y + dy, 0, H - 1) * W + clamp(x + dx, 0, W - 1)]);
+    return m;
+  };
+  /** Width multiplier per point from local edge strength, lightly averaged: brow thickness, eye shape, lip fullness. */
+  const widths = (pts: Pt[]) => {
+    const raw = pts.map((p) => 0.85 + 0.45 * clamp(magAt(p) / (an.strong * 2.5), 0, 1));
+    return raw.map((_, i) => {
       let s = 0;
       let n = 0;
-      for (let dy = -1; dy <= 1; dy++)
-        for (let dx = -1; dx <= 1; dx++) {
-          const xx = x + dx;
-          const yy = y + dy;
-          if (xx >= 0 && yy >= 0 && xx < w && yy < h) {
-            s += src[yy * w + xx];
-            n++;
-          }
-        }
-      out[y * w + x] = s / n;
+      for (let k = -2; k <= 2; k++) if (i + k >= 0 && i + k < raw.length) { s += raw[i + k]; n++; }
+      return clamp(s / n, 0.8, 1.3);
+    });
+  };
+  const mk = (pts: Pt[], kind: TStroke["kind"]): TStroke => ({ pts, kind, w: W_FEATURE, wm: widths(pts) });
+  const ring = (idx: number[]) => smoothClosed(idx.map(at), 1);
+  const line = (idx: number[]) => chaikin(idx.map(at), 1);
+  const out: TStroke[] = [
+    mk(ring(LEFT_EYEBROW), "brow"),
+    mk(ring(RIGHT_EYEBROW), "brow"),
+    mk(ring(LEFT_EYE), "eye"),
+    mk(ring(RIGHT_EYE), "eye"),
+    mk(line(NOSE_BRIDGE), "nose"),
+    mk(line(NOSE_BASE), "nose"),
+    mk(ring(LIPS_OUTER), "lips"),
+    mk(ring(LIPS_INNER), "lips"),
+  ];
+  if (lm.length >= 478) {
+    for (const [c, edge] of IRISES) {
+      const ctr = at(c);
+      const r = edge.reduce((s, i) => s + Math.hypot((lm[i].x - ctr.x) * W, (lm[i].y - ctr.y) * H), 0) / edge.length;
+      const circle = Array.from({ length: 16 }, (_, k) => {
+        const a = (k / 16) * Math.PI * 2;
+        return { x: ctr.x + (Math.cos(a) * r * 0.9) / W, y: ctr.y + (Math.sin(a) * r * 0.9) / H };
+      });
+      out.push(mk(smoothClosed(circle, 1), "eye"));
     }
+  }
   return out;
 }
 
-/** Zhang-Suen thinning of a binary image (1 = on). */
-function thin(img: Uint8Array, w: number, h: number): Uint8Array {
-  const a = img.slice();
-  const offs = [-w, -w + 1, 1, w + 1, w, w - 1, -1, -w - 1]; // P2..P9 clockwise from north
-  let changed = true;
-  for (let iter = 0; changed && iter < 40; iter++) {
-    changed = false;
-    for (let pass = 0; pass < 2; pass++) {
-      const del: number[] = [];
-      for (let y = 1; y < h - 1; y++)
-        for (let x = 1; x < w - 1; x++) {
-          const i = y * w + x;
-          if (!a[i]) continue;
-          const p = offs.map((o) => a[i + o]);
-          const b = p.reduce((s, v) => s + v, 0);
-          if (b < 2 || b > 6) continue;
-          let t = 0;
-          for (let k = 0; k < 8; k++) if (!p[k] && p[(k + 1) % 8]) t++;
-          if (t !== 1) continue;
-          const c1 = pass === 0 ? p[0] * p[2] * p[4] : p[0] * p[2] * p[6];
-          const c2 = pass === 0 ? p[2] * p[4] * p[6] : p[0] * p[4] * p[6];
-          if (c1 === 0 && c2 === 0) del.push(i);
-        }
-      if (del.length) changed = true;
-      del.forEach((i) => (a[i] = 0));
-    }
+const browTop = (lm: Landmark[]) => Math.min(...LEFT_EYEBROW.concat(RIGHT_EYEBROW).map((i) => lm[i].y));
+
+/** Lower part of the face oval (from temple around the chin to the other temple), below the eyebrow line. */
+function lowerArc(lm: Landmark[]): Pt[] {
+  const by = browTop(lm);
+  const pts = FACE_OVAL.map((i) => ({ x: lm[i].x, y: lm[i].y }));
+  const n = pts.length;
+  const low = pts.map((p) => p.y >= by);
+  let start = -1;
+  for (let i = 0; i < n; i++) if (low[i] && !low[(i + n - 1) % n]) { start = i; break; }
+  if (start < 0) return low.every(Boolean) ? smoothClosed(pts, 1) : [];
+  const run: Pt[] = [];
+  for (let k = 0; k < n; k++) {
+    const i = (start + k) % n;
+    if (!low[i]) break;
+    run.push(pts[i]);
   }
-  return a;
+  return chaikin(run, 1);
 }
 
-/** Walk a 1px skeleton into polylines (pixel coordinates). */
-function trace(skel: Uint8Array, w: number, h: number): Pt[][] {
-  const visited = new Uint8Array(skel.length);
-  const nbrs = (i: number): number[] => {
-    const x = i % w;
-    const y = (i / w) | 0;
-    const out: number[] = [];
-    for (let dy = -1; dy <= 1; dy++)
-      for (let dx = -1; dx <= 1; dx++) {
-        if (!dx && !dy) continue;
-        const xx = x + dx;
-        const yy = y + dy;
-        if (xx >= 0 && yy >= 0 && xx < w && yy < h && skel[yy * w + xx]) out.push(yy * w + xx);
+function faceOval(an: Analysis, lm: Landmark[], arc: Pt[] | null): TStroke {
+  const pts = arc && arc.length > 3 ? arc : smoothClosed(FACE_OVAL.map((i) => ({ x: lm[i].x, y: lm[i].y })), 1);
+  void an;
+  return { pts, kind: "face", w: W_FEATURE };
+}
+
+// ---------------------------------------------------------------- segmentation strokes
+function toStroke(poly: Pt[], an: Analysis, eps: number, iters: number): Pt[] {
+  return chaikin(simplify(poly, eps), iters).map((p) => ({ x: p.x / an.W, y: p.y / an.H }));
+}
+
+/** Outer contour of the person mask (classes 1-5): head and shoulders, hair or head covering. Thickest line. */
+function silhouetteStrokes(an: Analysis): TStroke[] {
+  const cached = an.cache.get("silhouette") as TStroke[] | undefined;
+  if (cached) return cached;
+  const out: TStroke[] = [];
+  if (an.masks) {
+    const polys = contours(an.masks.person, an.W, an.H, 0.5, 2)
+      .flatMap((p) => splitAtBorder(p, an.W, an.H, 3))
+      .filter((p) => pixelLength(p) >= 0.25 * an.H)
+      .sort((a, b) => pixelLength(b) - pixelLength(a))
+      .slice(0, 2);
+    for (const poly of polys) {
+      const pts = toStroke(poly, an, 1.2, 1);
+      const closed = Math.hypot(poly[0].x - poly[poly.length - 1].x, poly[0].y - poly[poly.length - 1].y) < 3;
+      if (closed) {
+        out.push({ pts, kind: "silhouette", w: W_SILHOUETTE });
+        continue;
       }
-    return out;
-  };
-  const starts: number[] = [];
-  const rest: number[] = [];
-  for (let i = 0; i < skel.length; i++) if (skel[i]) (nbrs(i).length === 1 ? starts : rest).push(i);
-  const paths: Pt[][] = [];
-  for (const s of [...starts, ...rest]) {
-    if (visited[s]) continue;
-    const path: Pt[] = [];
-    let cur = s;
-    while (cur >= 0) {
-      visited[cur] = 1;
-      path.push({ x: cur % w, y: (cur / w) | 0 });
-      const next = nbrs(cur).filter((n) => !visited[n]);
-      // prefer 4-connected neighbors for straighter walks
-      next.sort((p, q) => Math.abs(p - cur) % w - Math.abs(q - cur) % w);
-      cur = next.length ? next[0] : -1;
+      // open contour: split at the top of the head so the line starts there
+      let top = 0;
+      pts.forEach((p, i) => { if (p.y < pts[top].y) top = i; });
+      const a = pts.slice(0, top + 1).reverse();
+      const b = pts.slice(top);
+      for (const part of [a, b]) if (part.length > 3) out.push({ pts: part, kind: "silhouette", w: W_SILHOUETTE });
     }
-    if (path.length > 1) paths.push(path);
   }
-  return paths;
+  an.cache.set("silhouette", out);
+  return out;
 }
 
-export function getFaceStrokes(canvas: HTMLCanvasElement, detail: Detail = "low"): Stroke[] {
-  const cfg = SETTINGS[detail];
+/** Upper part of the face-skin contour (above the eyebrow line): the hairline or head-covering opening. */
+function boundaryStrokes(an: Analysis, lm: Landmark[], lower: Pt[]): TStroke[] {
+  const key = "boundary";
+  const cached = an.cache.get(key) as TStroke[] | undefined;
+  if (cached) return cached;
+  const out: TStroke[] = [];
+  if (an.masks) {
+    const polys = contours(an.masks.face, an.W, an.H, 0.5, 2).sort((a, b) => pixelLength(b) - pixelLength(a));
+    let poly = polys[0];
+    if (poly && pixelLength(poly) >= 0.15 * an.H) {
+      const limit = browTop(lm) * an.H + 0.015 * an.H;
+      const closed = Math.hypot(poly[0].x - poly[poly.length - 1].x, poly[0].y - poly[poly.length - 1].y) < 3;
+      if (closed) {
+        const core = poly.slice(0, -1);
+        const s = core.findIndex((p) => p.y >= limit);
+        if (s > 0) poly = [...core.slice(s), ...core.slice(0, s)];
+      }
+      const runs: Pt[][] = [];
+      let cur: Pt[] = [];
+      for (const p of poly) {
+        if (p.y < limit) cur.push(p);
+        else {
+          if (cur.length) runs.push(cur);
+          cur = [];
+        }
+      }
+      if (cur.length) runs.push(cur);
+      for (const run of runs) {
+        if (pixelLength(run) < 0.06 * an.W) continue;
+        for (const piece of dropNearDuplicates(toStroke(run, an, 1.2, 1), [lower], 0.012))
+          if (piece.length >= 4 && strokeLength(piece) >= 0.03) out.push({ pts: piece, kind: "boundary", w: W_FEATURE });
+      }
+    }
+  }
+  an.cache.set(key, out);
+  return out;
+}
+
+// ---------------------------------------------------------------- edge strokes (fallback and extras)
+const AW = 160;
+const AH = 200;
+const FALLBACK: Record<Detail, { keep: number; pct: number; minLen: number }> = {
+  simple: { keep: 12, pct: 0.07, minLen: 18 },
+  detailed: { keep: 16, pct: 0.11, minLen: 15 },
+  max: { keep: 20, pct: 0.16, minLen: 12 },
+};
+
+interface EdgeOptions {
+  keep: number;
+  pct: number;
+  minLen: number;
+  minEdge: number;
+  normalize: boolean;
+  inside: (x: number, y: number) => boolean;
+  exclude?: Uint8Array;
+}
+
+/** Adaptive edge strokes on a small grid: gradient percentile -> thinning -> tracing -> rank by length and centrality. */
+function edgeStrokes(canvas: HTMLCanvasElement, o: EdgeOptions): Stroke[] {
   const c = document.createElement("canvas");
   c.width = AW;
   c.height = AH;
@@ -117,16 +242,36 @@ export function getFaceStrokes(canvas: HTMLCanvasElement, detail: Detail = "low"
   const data = ctx.getImageData(0, 0, AW, AH).data;
   let g: Float32Array = new Float32Array(AW * AH);
   for (let i = 0; i < g.length; i++) g[i] = 0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2];
-  g = boxBlur(boxBlur(g, AW, AH), AW, AH);
-
-  // Tight face-oval mask
-  const inMask = (x: number, y: number) => ((x / AW - 0.5) / 0.4) ** 2 + ((y / AH - 0.48) / 0.45) ** 2 <= 1;
+  if (o.normalize) {
+    const sorted = Float32Array.from(g).sort();
+    const lo = sorted[Math.floor(sorted.length * 0.02)];
+    const hi = sorted[Math.floor(sorted.length * 0.98)];
+    const span = Math.max(30, hi - lo);
+    for (let i = 0; i < g.length; i++) g[i] = clamp(((g[i] - lo) / span) * 255, 0, 255);
+  }
+  const blur = (src: Float32Array) => {
+    const out = new Float32Array(src.length);
+    for (let y = 0; y < AH; y++)
+      for (let x = 0; x < AW; x++) {
+        let s = 0;
+        let n = 0;
+        for (let dy = -1; dy <= 1; dy++)
+          for (let dx = -1; dx <= 1; dx++) {
+            const xx = x + dx;
+            const yy = y + dy;
+            if (xx >= 0 && yy >= 0 && xx < AW && yy < AH) { s += src[yy * AW + xx]; n++; }
+          }
+        out[y * AW + x] = s / n;
+      }
+    return out;
+  };
+  g = blur(blur(g));
   const mag = new Float32Array(AW * AH);
   const vals: number[] = [];
   for (let y = 1; y < AH - 1; y++)
     for (let x = 1; x < AW - 1; x++) {
-      if (!inMask(x, y)) continue;
       const i = y * AW + x;
+      if (!o.inside(x, y) || (o.exclude && o.exclude[i])) continue;
       const gx = (g[i - AW + 1] + 2 * g[i + 1] + g[i + AW + 1] - g[i - AW - 1] - 2 * g[i - 1] - g[i + AW - 1]) / 8;
       const gy = (g[i + AW - 1] + 2 * g[i + AW] + g[i + AW + 1] - g[i - AW - 1] - 2 * g[i - AW] - g[i - AW + 1]) / 8;
       mag[i] = Math.hypot(gx, gy);
@@ -134,13 +279,10 @@ export function getFaceStrokes(canvas: HTMLCanvasElement, detail: Detail = "low"
     }
   if (!vals.length) return [];
   vals.sort((a, b) => a - b);
-  const thr = Math.max(vals[Math.floor(vals.length * (1 - cfg.pct))], MIN_EDGE);
-
+  const thr = Math.max(vals[Math.floor(vals.length * (1 - o.pct))], o.minEdge);
   const bin = new Uint8Array(AW * AH);
   for (let i = 0; i < bin.length; i++) bin[i] = mag[i] >= thr ? 1 : 0;
   const paths = trace(thin(bin, AW, AH), AW, AH);
-
-  // Rank by length and closeness to the face center; drop speckles and short strokes.
   const cx = AW * 0.5;
   const cy = AH * 0.48;
   const maxD = Math.hypot(AW * 0.4, AH * 0.45);
@@ -149,26 +291,131 @@ export function getFaceStrokes(canvas: HTMLCanvasElement, detail: Detail = "low"
       let len = 0;
       for (let i = 1; i < p.length; i++) len += Math.hypot(p[i].x - p[i - 1].x, p[i].y - p[i - 1].y);
       const mid = p[p.length >> 1];
-      const d = Math.hypot(mid.x - cx, mid.y - cy) / maxD;
-      return { p, len, score: len * (1.25 - Math.min(1, d)) };
+      return { p, len, score: len * (1.25 - Math.min(1, Math.hypot(mid.x - cx, mid.y - cy) / maxD)) };
     })
-    .filter((s) => s.len >= cfg.minLen)
+    .filter((s) => s.len >= o.minLen)
     .sort((a, b) => b.score - a.score)
-    .slice(0, cfg.keep);
-
+    .slice(0, o.keep);
   const strokes: Stroke[] = [];
   for (const { p } of ranked) {
-    const s = chaikin(simplify(p, 1.1), 2).map((q) => ({ x: q.x / AW, y: q.y / AH }));
+    const s = chaikin(simplify(p, 1.1), 1).map((q) => ({ x: q.x / AW, y: q.y / AH }));
     if (s.length > 3) strokes.push(s);
   }
-  return orderStrokes(strokes);
+  return strokes;
 }
 
-/** True when the edge pass found enough structure to look like a face. */
+function raster(draw: (ctx: CanvasRenderingContext2D) => void): Uint8Array {
+  const c = document.createElement("canvas");
+  c.width = AW;
+  c.height = AH;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  const out = new Uint8Array(AW * AH);
+  if (!ctx) return out;
+  draw(ctx);
+  const d = ctx.getImageData(0, 0, AW, AH).data;
+  for (let i = 0; i < out.length; i++) out[i] = d[i * 4 + 3] > 0 ? 1 : 0;
+  return out;
+}
+
+/** Edge strokes inside the face oval (or a 1.3x enlarged region when segmentation is missing), away from existing strokes. */
+function extraEdges(an: Analysis, lm: Landmark[], existing: TStroke[], keep: number, pct: number, enlarged: boolean): TStroke[] {
+  const key = `extra:${keep}:${pct}:${enlarged}:${existing.length}`;
+  const cached = an.cache.get(key) as TStroke[] | undefined;
+  if (cached) return cached;
+  let poly = FACE_OVAL.map((i) => ({ x: lm[i].x * AW, y: lm[i].y * AH }));
+  if (enlarged) {
+    const cx = poly.reduce((s, p) => s + p.x, 0) / poly.length;
+    const cy = poly.reduce((s, p) => s + p.y, 0) / poly.length;
+    poly = poly.map((p) => ({ x: cx + (p.x - cx) * 1.3, y: cy + (p.y - cy) * 1.3 }));
+  }
+  const inside = raster((ctx) => {
+    ctx.beginPath();
+    poly.forEach((p, k) => (k ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+    ctx.closePath();
+    ctx.fill();
+  });
+  const exclude = raster((ctx) => {
+    ctx.lineWidth = 7;
+    ctx.lineJoin = "round";
+    for (const s of existing) {
+      if (s.kind === "silhouette" || s.kind === "hair") continue;
+      ctx.beginPath();
+      s.pts.forEach((p, k) => (k ? ctx.lineTo(p.x * AW, p.y * AH) : ctx.moveTo(p.x * AW, p.y * AH)));
+      ctx.stroke();
+    }
+  });
+  const edges = edgeStrokes(an.canvas, { keep, pct, minLen: 12, minEdge: 3, normalize: true, inside: (x, y) => inside[y * AW + x] === 1, exclude });
+  const out: TStroke[] = edges.map((pts) => ({ pts, kind: enlarged ? "hair" : "face", w: enlarged ? W_HAIR : W_EXTRA }));
+  an.cache.set(key, out);
+  return out;
+}
+
+/** True when the edge fallback found enough structure to look like a face. */
 export function isClearFace(strokes: Stroke[]): boolean {
   return strokes.length >= 3 && strokes.reduce((n, s) => n + strokeLength(s), 0) >= 0.8;
 }
 
+// ---------------------------------------------------------------- the portrait
+export function buildPortrait(an: Analysis, s: PortraitSettings): Portrait {
+  const lm = hasLandmarks(an);
+  const detailed = s.detail !== "simple";
+  const strokes: TStroke[] = [...silhouetteStrokes(an)];
+  let ok = true;
+  let glasses = false;
+  let glassesScore = 0;
+  let hairN = 0;
+  let extraN = 0;
+
+  if (!lm) {
+    // No landmarks (model failed or no face): plain edge strokes, accepted only if they look like a face.
+    const cfg = FALLBACK[s.detail];
+    const edges = edgeStrokes(an.canvas, {
+      keep: cfg.keep,
+      pct: cfg.pct,
+      minLen: cfg.minLen,
+      minEdge: 9,
+      normalize: false,
+      inside: (x, y) => ((x / AW - 0.5) / 0.4) ** 2 + ((y / AH - 0.48) / 0.45) ** 2 <= 1,
+    });
+    ok = isClearFace(edges);
+    strokes.push(...edges.map((pts) => ({ pts, kind: "face" as const, w: 8 })));
+  } else {
+    const lower = lowerArc(lm);
+    const boundary = an.masks && detailed ? boundaryStrokes(an, lm, lower) : [];
+    strokes.push(...boundary, faceOval(an, lm, boundary.length ? lower : null), ...featureStrokes(an, lm));
+
+    const gl = detectGlasses(an, lm);
+    glassesScore = gl.score;
+    if (s.glasses === "on" || (s.glasses === "auto" && detailed && gl.present)) {
+      strokes.push(...glassesStrokes(gl, s.glasses === "on"));
+      glasses = true;
+    }
+    if (an.masks && s.hair && detailed) {
+      const hs = hairStrokes(an, s.detail === "max" ? 16 : 10);
+      strokes.push(...hs);
+      hairN = hs.length;
+    }
+    if (s.detail === "max" || (!an.masks && detailed)) {
+      const enlarged = !an.masks;
+      const ex = extraEdges(an, lm, strokes, s.detail === "max" ? 14 : 8, s.detail === "max" ? 0.12 : 0.08, enlarged);
+      strokes.push(...ex);
+      extraN = ex.length;
+    }
+  }
+
+  const ordered = orderTagged(strokes);
+  const counts: Record<string, number> = {};
+  for (const st of ordered) counts[st.kind] = (counts[st.kind] ?? 0) + 1;
+  return {
+    ok,
+    strokes: ordered,
+    path: buildLine(ordered),
+    base: buildRelief(an),
+    info: { glasses, glassesScore, hairStrokes: hairN, extraStrokes: extraN, model: lm && an.masks ? "ok" : "fallback", counts },
+  };
+}
+
+// ---------------------------------------------------------------- idle sample
 const arc = (cx: number, cy: number, rx: number, ry: number, a0: number, a1: number, n = 36): Stroke =>
   Array.from({ length: n + 1 }, (_, i) => {
     const a = ((a0 + ((a1 - a0) * i) / n) * Math.PI) / 180;
@@ -189,5 +436,3 @@ export function sampleFaceStrokes(): Stroke[] {
     curve([0.42, 0.65], [0.5, 0.68], [0.58, 0.65]),
   ]);
 }
-
-export { ASPECT };

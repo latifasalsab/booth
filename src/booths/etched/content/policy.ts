@@ -20,7 +20,7 @@ export const POLICY_SECTIONS = [
   {
     id: "camera",
     heading: "Camera",
-    body: "The camera starts only after you press Start camera and allow access. It stops as soon as the photo is taken.",
+    body: "The camera starts only after you press Start camera and allow access. It stops as soon as the photo is taken. A small face-detection model runs in your browser. Its file is fetched once from a public server and cached; no photo or camera data is sent anywhere.",
   },
   {
     id: "photos",
