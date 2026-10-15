@@ -4,7 +4,7 @@
  * page background (rounded, drop-shadow), oval face guide, live dot, 3-2-1 digits and the capture flash.
  * Never mirrored.
  */
-import type { RefObject } from "react";
+import type { ReactNode, RefObject } from "react";
 import type { CameraStatus } from "../hooks/useCamera";
 
 interface Props {
@@ -14,9 +14,11 @@ interface Props {
   count: number | null;
   flash: boolean;
   status: CameraStatus;
+  /** Optional layer drawn over the media (the ?debug=1 overlay). */
+  overlay?: ReactNode;
 }
 
-export default function CameraStage({ mode, videoRef, photoUrl, count, flash, status }: Props) {
+export default function CameraStage({ mode, videoRef, photoUrl, count, flash, status, overlay }: Props) {
   const review = mode === "review";
   return (
     <div className="etb-shadow relative overflow-hidden rounded-[22px] bg-black/50" style={{ aspectRatio: "4 / 5", height: "100%", maxWidth: "100%" }}>
@@ -49,6 +51,7 @@ export default function CameraStage({ mode, videoRef, photoUrl, count, flash, st
         </div>
       )}
 
+      {overlay}
       <div aria-hidden className="pointer-events-none absolute inset-0 bg-white" style={{ opacity: flash ? 0.85 : 0, transition: `opacity ${flash ? 40 : 260}ms linear` }} />
     </div>
   );

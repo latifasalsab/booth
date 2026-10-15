@@ -3,7 +3,8 @@
  * Etched Booth main screen and state machine:
  * IDLE -> CAMERA -> COUNTDOWN -> REVIEW -> ETCH -> EDIT -> PRINT (upload is an alternative to the camera at IDLE).
  * Left: the plate / camera stage directly on the page. Right: the steel kiosk card. Fixed to 100dvh, no scroll.
- * Everything runs on the device; nothing is uploaded.
+ * Each photo is analyzed ONCE (landmarks, person segmentation, edge maps; lib/analysis.ts) and cached; Detail, Glasses
+ * and Hair & head covering only recompute strokes from that cache. Everything runs on the device.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useReducedMotion } from "framer-motion";
@@ -11,13 +12,14 @@ import type { SoundMap } from "@/types";
 import { useCurtain } from "@/components/shared/PageCurtain";
 import { cropToPortrait, useCamera } from "../hooks/useCamera";
 import { useEmbossProgress } from "../hooks/useEmbossProgress";
-import { detectLandmarks } from "../lib/faceLandmarker";
-import { getFaceStrokes, isClearFace, sampleFaceStrokes, type Detail, type Landmark } from "../lib/faceStrokes";
-import { createHeightCanvas, hitTest, lineDeco, makeDeco, paintHeightMap, type Deco, type DecoKind } from "../lib/heightMap";
+import { analyzePhoto, type Analysis } from "../lib/analysis";
+import { buildPortrait, DEFAULT_SETTINGS, MODE_NOTE, sampleFaceStrokes, type Detail, type GlassesMode, type Portrait, type PortraitSettings } from "../lib/faceStrokes";
+import { createHeightCanvas, HeightPainter, hitTest, lineDeco, makeDeco, WIDTH_SCALE, type Deco, type DecoKind } from "../lib/heightMap";
 import type { MetalKey } from "../lib/plateScene";
 import { configureSound, initEmbossSound, play } from "../lib/sound";
-import { buildSingleLine, pointAt, type LinePath, type Pt } from "../lib/strokePath";
+import { buildSingleLine, etchDuration, pointAt, type Pt } from "../lib/strokePath";
 import CameraStage from "./CameraStage";
+import DebugOverlay from "./DebugOverlay";
 import KioskPanel from "./KioskPanel";
 import PickupView from "./PickupView";
 import PlateCanvas, { type PenState, type PlateHandle, type SurfaceEvent } from "./PlateCanvas";
@@ -39,11 +41,22 @@ const LABELS: Record<Step, string> = {
   EDIT: "ADJUST AND PRINT",
   PRINT: "PRINTING",
 };
-const ETCH_MS = 5000;
+const IDLE_MS = 5000;
 const PLATES_KEY = "etched.plates";
 const NO_FACE = "We couldn't find a clear face. Try better light.";
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const clamp01 = (v: number) => Math.min(0.95, Math.max(0.05, v));
+
+/** ?debug=1: console.table of what was detected. */
+function logDetections(p: Portrait) {
+  console.table([
+    { detection: "glasses", value: p.info.glasses ? "yes" : "no", detail: `score ${p.info.glassesScore.toFixed(2)}` },
+    { detection: "hair strokes", value: p.info.hairStrokes, detail: "" },
+    { detection: "extra edge strokes", value: p.info.extraStrokes, detail: "" },
+    { detection: "model", value: p.info.model, detail: "landmarks + segmentation" },
+    { detection: "strokes by kind", value: JSON.stringify(p.info.counts), detail: "" },
+  ]);
+}
 
 export default function EtchedBooth({ sound }: { sound: SoundMap }) {
   const curtain = useCurtain();
@@ -55,18 +68,25 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
   stepRef.current = step;
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [modeNote, setModeNote] = useState<string | null>(null);
   const [count, setCount] = useState<number | null>(null);
   const [flash, setFlash] = useState(false);
   const [photoUrl, setPhotoUrl] = useState<string | null>(null);
   const photoRef = useRef<HTMLCanvasElement | null>(null);
   const [uiProgress, setUiProgress] = useState(0);
   const [analyzing, setAnalyzing] = useState(false);
-  const landmarksRef = useRef<Landmark[] | null>(null);
   const [plates, setPlates] = useState(0);
   const platesRef = useRef(0);
+  const [debug, setDebug] = useState(false);
+  const debugRef = useRef(false);
+  const [dbg, setDbg] = useState<{ an: Analysis; portrait: Portrait } | null>(null);
+  const analysisRef = useRef<{ promise: Promise<Analysis>; value: Analysis | null } | null>(null);
 
   // Edit settings
-  const [detail, setDetail] = useState<Detail>("low");
+  const [detail, setDetail] = useState<Detail>(DEFAULT_SETTINGS.detail);
+  const [glassesMode, setGlassesMode] = useState<GlassesMode>(DEFAULT_SETTINGS.glasses);
+  const [hair, setHair] = useState(DEFAULT_SETTINGS.hair);
+  const settingsRef = useRef<PortraitSettings>(DEFAULT_SETTINGS);
   const [size, setSize] = useState(0.5);
   const [depth, setDepth] = useState(0.5);
   const [metal, setMetal] = useState<MetalKey>("silver");
@@ -82,26 +102,29 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
 
   // Plate drawing state lives in refs so the animation never re-renders React.
   const heightCanvas = useMemo(() => (typeof document === "undefined" ? null : createHeightCanvas()), []);
+  const painter = useMemo(() => new HeightPainter(), []);
   const versionRef = useRef(0);
   const penRef = useRef<PenState>({ x: 0, y: 0, on: false });
   const plateRef = useRef<PlateHandle>(null);
-  const thickness = 4 + size * 10;
-  const dataRef = useRef<{ path: LinePath | null; decos: Deco[]; thickness: number }>({ path: null, decos: [], thickness });
+  const progressRef = useRef(0);
+  const sizeK = 0.6 + size * 0.8; // Size slider scales every stroke width
+  const decoW = 7 * WIDTH_SCALE * sizeK;
+  const dataRef = useRef<{ decos: Deco[]; decoW: number }>({ decos: [], decoW });
 
   const repaint = useCallback(
     (p: number) => {
       if (!heightCanvas) return;
-      const d = dataRef.current;
-      paintHeightMap(heightCanvas, d.path, p, d.decos, d.thickness);
+      painter.paint(heightCanvas, p, dataRef.current.decos, dataRef.current.decoW);
       versionRef.current++;
     },
-    [heightCanvas],
+    [heightCanvas, painter],
   );
 
   const onFrame = useCallback(
     (p: number) => {
+      progressRef.current = p;
       repaint(p);
-      const path = dataRef.current.path;
+      const path = painter.path;
       if (path) {
         const pt = pointAt(path, p);
         penRef.current = { x: pt.x, y: pt.y, on: p > 0 && p < 1 };
@@ -109,16 +132,22 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
       const pct = Math.round(p * 100);
       setUiProgress((prev) => (prev === pct ? prev : pct));
     },
-    [repaint],
+    [painter, repaint],
   );
   const etch = useEmbossProgress(onFrame, false);
-  const idleLoop = useEmbossProgress(onFrame, true);
+  const quiet = useEmbossProgress(onFrame, true); // idle loop and relief replays: no global progress, no sound
 
   useEffect(() => {
-    dataRef.current.decos = decos;
-    dataRef.current.thickness = thickness;
-    if (step === "EDIT") repaint(1);
-  }, [decos, thickness, step, repaint]);
+    painter.setSizeK(sizeK);
+    dataRef.current = { decos, decoW };
+    if (step === "EDIT") repaint(progressRef.current);
+  }, [painter, sizeK, decoW, decos, step, repaint]);
+
+  useEffect(() => {
+    const on = new URLSearchParams(window.location.search).get("debug") === "1";
+    debugRef.current = on;
+    setDebug(on);
+  }, []);
 
   // Sound wiring and plate counter
   useEffect(() => {
@@ -142,11 +171,12 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
     if (step !== "IDLE") return;
     let alive = true;
     let timer = 0;
-    dataRef.current.path = buildSingleLine(sampleFaceStrokes());
-    dataRef.current.decos = [];
+    painter.setBase(null);
+    painter.setPath(buildSingleLine(sampleFaceStrokes(), 9));
+    dataRef.current = { decos: [], decoW };
     const run = () => {
       if (!alive) return;
-      idleLoop.start(reduced ? 900 : ETCH_MS, () => {
+      quiet.start(reduced ? 900 : IDLE_MS, () => {
         penRef.current = { ...penRef.current, on: false };
         timer = window.setTimeout(run, 2400);
       });
@@ -155,22 +185,42 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
     return () => {
       alive = false;
       window.clearTimeout(timer);
-      idleLoop.cancel();
+      quiet.cancel();
       penRef.current = { x: 0, y: 0, on: false };
     };
-  }, [step, idleLoop, reduced]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, quiet, reduced, painter]);
 
   const acceptPhoto = useCallback((canvas: HTMLCanvasElement) => {
     photoRef.current = canvas;
-    landmarksRef.current = null;
     setPhotoUrl(canvas.toDataURL("image/jpeg", 0.92));
     setError(null);
+    setModeNote(null);
+    setDbg(null);
     setStep("REVIEW");
+    // Analyze once, in the background: landmarks, segmentation, edge maps.
+    const slot = { promise: analyzePhoto(canvas), value: null as Analysis | null };
+    analysisRef.current = slot;
+    slot.promise
+      .then((an) => {
+        if (analysisRef.current !== slot) return;
+        slot.value = an;
+        setModeNote(an.masks ? null : MODE_NOTE);
+        if (debugRef.current) {
+          const portrait = buildPortrait(an, settingsRef.current);
+          setDbg({ an, portrait });
+          logDetections(portrait);
+        }
+      })
+      .catch(() => {
+        if (analysisRef.current === slot) analysisRef.current = null;
+      });
   }, []);
 
   const startCamera = useCallback(async () => {
     setNotice(null);
     setError(null);
+    analysisRef.current = null;
     setStep("CAMERA");
     const s = await camStart();
     if (stepRef.current !== "CAMERA" || s === "idle") return;
@@ -196,7 +246,7 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
       setCount(n);
       play("countdown");
       await sleep(900);
-      if ((stepRef.current as Step) !== "COUNTDOWN") return;
+      if (stepRef.current !== "COUNTDOWN") return;
     }
     setCount(null);
     play("shutter");
@@ -230,45 +280,68 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
   );
 
   const continueToEtch = useCallback(async () => {
-    const photo = photoRef.current;
-    if (!photo || analyzing) return;
+    const slot = analysisRef.current;
+    if (!slot || analyzing) return;
     setAnalyzing(true);
     setError(null);
-    const lm = await detectLandmarks(photo); // null if the model cannot load or no face is found
-    setAnalyzing(false);
-    if (stepRef.current !== "REVIEW") return;
-    landmarksRef.current = lm;
-    const strokes = getFaceStrokes(photo, detail, lm);
-    if (!lm && !isClearFace(strokes)) {
+    let an: Analysis;
+    try {
+      an = await slot.promise;
+    } catch {
+      setAnalyzing(false);
       setError(NO_FACE);
       return;
     }
-    dataRef.current.path = buildSingleLine(strokes);
-    dataRef.current.decos = [];
+    setAnalyzing(false);
+    if (stepRef.current !== "REVIEW" || analysisRef.current !== slot) return;
+    const settings = { detail, glasses: glassesMode, hair };
+    settingsRef.current = settings;
+    const portrait = buildPortrait(an, settings);
+    if (!portrait.ok) {
+      setError(NO_FACE);
+      return;
+    }
+    painter.setBase(portrait.base);
+    painter.setPath(portrait.path);
+    dataRef.current = { decos: [], decoW };
     setDecos([]);
     setHistory([]);
     setSelectedId(null);
     setStep("ETCH");
-    etch.start(reduced ? 1200 : ETCH_MS, () => {
+    etch.start(reduced ? 1200 : etchDuration(portrait.path), () => {
       penRef.current = { ...penRef.current, on: false };
       setStep("EDIT");
     });
-  }, [detail, etch, reduced, analyzing]);
+  }, [analyzing, detail, glassesMode, hair, painter, decoW, etch, reduced]);
 
-  const changeDetail = useCallback(
-    (d: Detail) => {
-      setDetail(d);
-      const photo = photoRef.current;
-      if (!photo) return;
-      const lm = landmarksRef.current;
-      const strokes = getFaceStrokes(photo, d, lm);
-      if (lm || isClearFace(strokes)) {
-        dataRef.current.path = buildSingleLine(strokes);
-        repaint(1);
-      }
+  /** Recompute strokes from the cached analysis and replay only the relief update (no new analysis). */
+  const applySettings = useCallback(
+    (next: PortraitSettings) => {
+      settingsRef.current = next;
+      const an = analysisRef.current?.value;
+      if (!an) return;
+      const portrait = buildPortrait(an, next);
+      if (!portrait.ok) return;
+      painter.setBase(portrait.base);
+      painter.setPath(portrait.path);
+      quiet.start(reduced ? 300 : 1500, () => {
+        penRef.current = { ...penRef.current, on: false };
+      });
     },
-    [repaint],
+    [painter, quiet, reduced],
   );
+  const changeDetail = (d: Detail) => {
+    setDetail(d);
+    applySettings({ detail: d, glasses: glassesMode, hair });
+  };
+  const changeGlasses = (g: GlassesMode) => {
+    setGlassesMode(g);
+    applySettings({ detail, glasses: g, hair });
+  };
+  const changeHair = (h: boolean) => {
+    setHair(h);
+    applySettings({ detail, glasses: glassesMode, hair: h });
+  };
 
   // Plate editing
   const nextId = useRef(1);
@@ -393,20 +466,24 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
       setPrint(null);
       setPhotoUrl(null);
       photoRef.current = null;
-      landmarksRef.current = null;
+      analysisRef.current = null;
+      settingsRef.current = DEFAULT_SETTINGS;
+      setDbg(null);
+      setModeNote(null);
       setDecos([]);
       setHistory([]);
       setSelectedId(null);
       setTool(null);
       setError(null);
       setNotice(null);
-      setDetail("low");
+      setDetail(DEFAULT_SETTINGS.detail);
+      setGlassesMode(DEFAULT_SETTINGS.glasses);
+      setHair(DEFAULT_SETTINGS.hair);
       setSize(0.5);
       setDepth(0.5);
       setMetal("silver");
       setBw(false);
       penRef.current = { x: 0, y: 0, on: false };
-      dataRef.current.path = null;
       setStep("IDLE");
     });
   }, [behindCurtain, camStop]);
@@ -443,6 +520,7 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
                   count={count}
                   flash={flash}
                   status={camStatus}
+                  overlay={debug && step === "REVIEW" ? <DebugOverlay an={dbg?.an ?? null} portrait={dbg?.portrait ?? null} /> : undefined}
                 />
               </div>
             )}
@@ -454,10 +532,11 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
             {step === "IDLE" && <IdleStep plates={plates} notice={notice} onStart={startCamera} onUpload={onUpload} />}
             {step === "CAMERA" && <CameraStep ready={camStatus === "live"} onCapture={takePhoto} onCancel={cancelCamera} />}
             {step === "COUNTDOWN" && <CountdownStep count={count} />}
-            {step === "REVIEW" && <ReviewStep error={error} busy={analyzing} onContinue={continueToEtch} onRetake={startCamera} />}
+            {step === "REVIEW" && <ReviewStep error={error} note={modeNote} busy={analyzing} onContinue={continueToEtch} onRetake={startCamera} />}
             {step === "ETCH" && <EtchStep progress={uiProgress} />}
             {(step === "EDIT" || step === "PRINT") && (
               <EditStep
+                note={modeNote}
                 tool={tool}
                 onTool={setTool}
                 textValue={textValue}
@@ -468,6 +547,10 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
                 onDepth={setDepth}
                 detail={detail}
                 onDetail={changeDetail}
+                glasses={glassesMode}
+                onGlasses={changeGlasses}
+                hair={hair}
+                onHair={changeHair}
                 metal={metal}
                 onMetal={setMetal}
                 bw={bw}

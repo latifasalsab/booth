@@ -5,7 +5,7 @@
  */
 import SteelButton from "../SteelButton";
 import { KioskDisplay, KioskFooter } from "../KioskPanel";
-import type { Detail } from "../../lib/faceStrokes";
+import type { Detail, GlassesMode } from "../../lib/faceStrokes";
 import { unitPolylines, type DecoKind } from "../../lib/heightMap";
 import { METALS, type MetalKey } from "../../lib/plateScene";
 
@@ -18,9 +18,14 @@ const TOOLS: { id: DecoKind; label: string }[] = [
   { id: "line", label: "Free line" },
 ];
 const DETAILS: { id: Detail; label: string }[] = [
-  { id: "low", label: "Low" },
-  { id: "medium", label: "Medium" },
-  { id: "high", label: "High" },
+  { id: "simple", label: "Simple" },
+  { id: "detailed", label: "Detailed" },
+  { id: "max", label: "Max" },
+];
+const GLASSES: { id: GlassesMode; label: string }[] = [
+  { id: "auto", label: "Auto" },
+  { id: "on", label: "On" },
+  { id: "off", label: "Off" },
 ];
 
 function ToolIcon({ kind }: { kind: DecoKind }) {
@@ -58,6 +63,11 @@ interface Props {
   onDepth: (v: number) => void;
   detail: Detail;
   onDetail: (d: Detail) => void;
+  glasses: GlassesMode;
+  onGlasses: (g: GlassesMode) => void;
+  hair: boolean;
+  onHair: (v: boolean) => void;
+  note?: string | null;
   metal: MetalKey;
   onMetal: (m: MetalKey) => void;
   bw: boolean;
@@ -76,6 +86,7 @@ export default function EditStep(p: Props) {
     <>
       <KioskDisplay>
         <div className="flex flex-col gap-3.5">
+          {p.note && <p className="notice">{p.note}</p>}
           <section aria-label="Tools">
             <div className="flex flex-wrap gap-1.5">
               {TOOLS.map((t) => (
@@ -116,6 +127,28 @@ export default function EditStep(p: Props) {
               {DETAILS.map((d) => (
                 <button key={d.id} type="button" aria-pressed={p.detail === d.id} onClick={() => p.onDetail(d.id)}>
                   {d.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] font-semibold">Glasses</span>
+            <div className="seg" role="group" aria-label="Glasses">
+              {GLASSES.map((g) => (
+                <button key={g.id} type="button" aria-pressed={p.glasses === g.id} onClick={() => p.onGlasses(g.id)}>
+                  {g.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] font-semibold">Hair &amp; head covering</span>
+            <div className="seg" role="group" aria-label="Hair and head covering">
+              {[true, false].map((v) => (
+                <button key={String(v)} type="button" aria-pressed={p.hair === v} onClick={() => p.onHair(v)}>
+                  {v ? "On" : "Off"}
                 </button>
               ))}
             </div>
