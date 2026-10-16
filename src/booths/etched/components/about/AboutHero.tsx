@@ -32,7 +32,7 @@ export default function AboutHero({ portraitSrc }: { portraitSrc: string | null 
   const repaint = useCallback(
     (p: number) => {
       if (!heightCanvas) return;
-      painter.paint(heightCanvas, p, [], 0);
+      painter.paint(heightCanvas, p, []);
       versionRef.current++;
     },
     [heightCanvas, painter],

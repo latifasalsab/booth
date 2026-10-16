@@ -1,7 +1,8 @@
 "use client";
 /**
  * ?debug=1 overlay for the REVIEW step: segmentation classes at 35% alpha, the extracted stroke outlines and a small
- * label "glasses: yes/no · hair strokes: N · model: ok/fallback". Never rendered without the flag.
+ * label "glasses: no|traced|fitted|fallback · hair strokes: N · model: ok/fallback". Glasses debug: traced frame
+ * center-line points (yellow dots) and the final lens curves (lime). Never rendered without the flag.
  */
 import { useEffect, useRef } from "react";
 import type { Analysis } from "../lib/analysis";
@@ -63,6 +64,18 @@ export default function DebugOverlay({ an, portrait }: { an: Analysis | null; po
         s.pts.forEach((p, i) => (i ? ctx.lineTo(p.x * W, p.y * H) : ctx.moveTo(p.x * W, p.y * H)));
         ctx.stroke();
       }
+      const g = portrait.info.glassesDebug;
+      if (g && portrait.info.glasses) {
+        ctx.fillStyle = "#ffd166";
+        for (const set of g.trace) for (const p of set) ctx.fillRect(p.x * W - 1, p.y * H - 1, 2, 2);
+        ctx.strokeStyle = "#d3fb43";
+        ctx.lineWidth = 2;
+        for (const f of g.fits) {
+          ctx.beginPath();
+          f.forEach((p, i) => (i ? ctx.lineTo(p.x * W, p.y * H) : ctx.moveTo(p.x * W, p.y * H)));
+          ctx.stroke();
+        }
+      }
     }
   }, [an, portrait]);
 
@@ -71,7 +84,7 @@ export default function DebugOverlay({ an, portrait }: { an: Analysis | null; po
     <>
       <canvas ref={ref} aria-hidden className="pointer-events-none absolute inset-0 h-full w-full" />
       <div className="pointer-events-none absolute inset-x-2 bottom-2 rounded-md bg-black/75 px-2 py-1 font-dot text-[11px] tracking-[.06em] text-white">
-        {info ? `glasses: ${info.glasses ? "yes" : "no"} · hair strokes: ${info.hairStrokes} · model: ${info.model === "ok" ? "ok" : "fallback"}` : "analyzing…"}
+        {info ? `glasses: ${info.glasses ? info.glassesMode : "no"} · hair strokes: ${info.hairStrokes} · model: ${info.model === "ok" ? "ok" : "fallback"}` : "analyzing…"}
       </div>
     </>
   );
