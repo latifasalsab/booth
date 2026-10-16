@@ -25,6 +25,8 @@ export interface Analysis {
   W: number;
   H: number;
   canvas: HTMLCanvasElement;
+  /** Lightly blurred luminance, 0..255 (glasses frame tracing). */
+  lum: Float32Array;
   /** Blurred luminance, 0..1 (tonal relief). */
   gray: Float32Array;
   /** Gradient magnitude of the locally contrast-normalized luminance (per pixel). */
@@ -113,6 +115,7 @@ export async function analyzePhoto(canvas: HTMLCanvasElement): Promise<Analysis>
       mag[i] = Math.hypot(gx, gy);
     }
   const gray = boxBlur(g1, W, H, 6);
+  const lum = boxBlur(g0, W, H, 1);
 
   // strong-edge threshold from the face region
   let cx = 0.5 * W;
@@ -136,6 +139,7 @@ export async function analyzePhoto(canvas: HTMLCanvasElement): Promise<Analysis>
     W,
     H,
     canvas,
+    lum,
     gray,
     mag,
     strong,
