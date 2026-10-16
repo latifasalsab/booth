@@ -8,10 +8,11 @@
  */
 import { buildRelief, type Analysis } from "./analysis";
 import { contours, dropNearDuplicates, pixelLength, splitAtBorder } from "./contours";
-import { detectGlasses, glassesStrokes, type GlassesMode } from "./glasses";
+import { detectGlasses, glassesStrokes, type GlassesMode, type LensMode } from "./glasses";
+import { cleanedPerson, headMetrics } from "./head";
 import { hairStrokes } from "./hairStrokes";
 import { FACE_OVAL, IRISES, LEFT_EYE, LEFT_EYEBROW, LIPS_INNER, LIPS_OUTER, NOSE_BASE, NOSE_BRIDGE, RIGHT_EYE, RIGHT_EYEBROW } from "./landmarkIndices";
-import { clamp, thin, trace } from "./raster";
+import { clamp, cleanMask, thin, trace } from "./raster";
 import { buildLine, chaikin, orderStrokes, orderTagged, simplify, strokeLength, type LinePath, type Pt, type Stroke, type TStroke } from "./strokePath";
 
 export type Detail = "simple" | "detailed" | "max";
@@ -20,17 +21,29 @@ export interface Landmark {
   x: number;
   y: number;
 }
+/** Layer visibility (EDIT > Layers). "tonal" is the layered relief base (plateaus + tonal relief). */
+export interface Layers {
+  silhouette: boolean;
+  face: boolean;
+  glasses: boolean;
+  hair: boolean;
+  tonal: boolean;
+}
+export const DEFAULT_LAYERS: Layers = { silhouette: true, face: true, glasses: true, hair: true, tonal: true };
 export interface PortraitSettings {
   detail: Detail;
   glasses: GlassesMode;
-  hair: boolean;
+  layers: Layers;
 }
-export const DEFAULT_SETTINGS: PortraitSettings = { detail: "detailed", glasses: "auto", hair: true };
+export const DEFAULT_SETTINGS: PortraitSettings = { detail: "detailed", glasses: "auto", layers: DEFAULT_LAYERS };
 export const MODE_NOTE = "Detailed mode unavailable, using basic mode";
 
 export interface PortraitInfo {
   glasses: boolean;
   glassesScore: number;
+  /** How the frames were built: traced from pixels, fitted with a curve, or the landmark ellipse fallback. */
+  glassesMode: LensMode | "none";
+  glassesDebug: { trace: Pt[][]; fits: Pt[][] } | null;
   hairStrokes: number;
   extraStrokes: number;
   model: "ok" | "fallback";
@@ -140,48 +153,70 @@ function faceOval(an: Analysis, lm: Landmark[], arc: Pt[] | null): TStroke {
 }
 
 // ---------------------------------------------------------------- segmentation strokes
-function toStroke(poly: Pt[], an: Analysis, eps: number, iters: number): Pt[] {
-  return chaikin(simplify(poly, eps), iters).map((p) => ({ x: p.x / an.W, y: p.y / an.H }));
-}
+const norm = (p: Pt[], an: Analysis): Pt[] => p.map((q) => ({ x: q.x / an.W, y: q.y / an.H }));
+/** Simplify (epsilon as a fraction of the image width), then smooth. Pixel polyline in, pixel polyline out. */
+const smoothPx = (poly: Pt[], an: Analysis, epsFrac: number, iters: number): Pt[] => chaikin(simplify(poly, epsFrac * an.W), iters);
+/** Shoulder line width multiplier: tapers toward the image edge. */
+const taper = (x: number) => clamp(0.4 + 0.6 * (Math.min(x, 1 - x) / 0.25), 0.4, 1);
 
-/** Outer contour of the person mask (classes 1-5): head and shoulders, hair or head covering. Thickest line. */
+/**
+ * Silhouette of the cleaned person mask (closing, hole filling, largest component, strong blur). The head part (above
+ * chin + 10% head height) is simplified at about 1.2% of the width and smoothed with 2 Chaikin passes; below that line
+ * the shoulders become one smooth, heavily simplified line per side with a tapering width. The pieces form one chain
+ * that starts at the top of the head (seq): top -> left side -> left shoulder -> (bottom) -> right shoulder -> right side.
+ */
 function silhouetteStrokes(an: Analysis): TStroke[] {
   const cached = an.cache.get("silhouette") as TStroke[] | undefined;
   if (cached) return cached;
   const out: TStroke[] = [];
-  if (an.masks) {
-    const polys = contours(an.masks.person, an.W, an.H, 0.5, 2)
+  const field = cleanedPerson(an);
+  if (field) {
+    const polys = contours(field, an.W, an.H, 0.5, 2)
       .flatMap((p) => splitAtBorder(p, an.W, an.H, 3))
       .filter((p) => pixelLength(p) >= 0.25 * an.H)
       .sort((a, b) => pixelLength(b) - pixelLength(a))
-      .slice(0, 2);
-    for (const poly of polys) {
-      const pts = toStroke(poly, an, 1.2, 1);
-      const closed = Math.hypot(poly[0].x - poly[poly.length - 1].x, poly[0].y - poly[poly.length - 1].y) < 3;
-      if (closed) {
-        out.push({ pts, kind: "silhouette", w: W_SILHOUETTE });
-        continue;
+      .slice(0, 1);
+    const line = headMetrics(an)?.line ?? Infinity;
+    for (let poly of polys) {
+      if (Math.hypot(poly[0].x - poly[poly.length - 1].x, poly[0].y - poly[poly.length - 1].y) < 3) {
+        const core = poly.slice(0, -1); // closed loop: open it at its lowest point
+        let low = 0;
+        core.forEach((p, i) => { if (p.y > core[low].y) low = i; });
+        poly = [...core.slice(low), ...core.slice(0, low)];
       }
-      // open contour: split at the top of the head so the line starts there
+      let i0 = poly.findIndex((p) => p.y < line);
+      let i1 = -1;
+      poly.forEach((p, i) => { if (p.y < line) i1 = i; });
+      if (i0 < 0) { i0 = 0; i1 = poly.length - 1; }
+      const headPart = poly.slice(i0, i1 + 1);
+      const left = poly.slice(0, i0 + 1);
+      const right = poly.slice(i1);
+      const add = (pts: Pt[], seq: number, shoulder: boolean) => {
+        if (pts.length >= 3) out.push({ pts, kind: "silhouette", w: W_SILHOUETTE, seq, wm: shoulder ? pts.map((p) => taper(p.x)) : undefined });
+      };
+      const hp = headPart.length >= 4 ? norm(smoothPx(headPart, an, 0.012, 2), an) : [];
       let top = 0;
-      pts.forEach((p, i) => { if (p.y < pts[top].y) top = i; });
-      const a = pts.slice(0, top + 1).reverse();
-      const b = pts.slice(top);
-      for (const part of [a, b]) if (part.length > 3) out.push({ pts: part, kind: "silhouette", w: W_SILHOUETTE });
+      hp.forEach((p, i) => { if (p.y < hp[top].y) top = i; });
+      add(hp.slice(0, top + 1).reverse(), 0, false); // top -> left junction
+      const shoulder = (piece: Pt[]) => (pixelLength(piece) >= 0.03 * an.W ? norm(smoothPx(piece, an, 0.024, 3), an) : []);
+      add(shoulder(left).reverse(), 1, true); // junction -> left border
+      add(shoulder(right).reverse(), 2, true); // right border -> junction
+      add(hp.slice(top).reverse(), 3, false); // right junction -> top
     }
   }
   an.cache.set("silhouette", out);
   return out;
 }
 
-/** Upper part of the face-skin contour (above the eyebrow line): the hairline or head-covering opening. */
+/** Upper part of the face-skin contour (above the eyebrow line): the hairline or head-covering opening, strongly smoothed. */
 function boundaryStrokes(an: Analysis, lm: Landmark[], lower: Pt[]): TStroke[] {
   const key = "boundary";
   const cached = an.cache.get(key) as TStroke[] | undefined;
   if (cached) return cached;
   const out: TStroke[] = [];
   if (an.masks) {
-    const polys = contours(an.masks.face, an.W, an.H, 0.5, 2).sort((a, b) => pixelLength(b) - pixelLength(a));
+    const field = cleanMask(an.masks.face, an.W, an.H, { closeR: 3, blurR: 3, passes: 3 });
+    const polys = contours(field, an.W, an.H, 0.5, 2).sort((a, b) => pixelLength(b) - pixelLength(a));
     let poly = polys[0];
     if (poly && pixelLength(poly) >= 0.15 * an.H) {
       const limit = browTop(lm) * an.H + 0.015 * an.H;
@@ -203,7 +238,7 @@ function boundaryStrokes(an: Analysis, lm: Landmark[], lower: Pt[]): TStroke[] {
       if (cur.length) runs.push(cur);
       for (const run of runs) {
         if (pixelLength(run) < 0.06 * an.W) continue;
-        for (const piece of dropNearDuplicates(toStroke(run, an, 1.2, 1), [lower], 0.012))
+        for (const piece of dropNearDuplicates(norm(smoothPx(run, an, 0.008, 3), an), [lower], 0.012))
           if (piece.length >= 4 && strokeLength(piece) >= 0.03) out.push({ pts: piece, kind: "boundary", w: W_FEATURE });
       }
     }
@@ -320,6 +355,7 @@ function raster(draw: (ctx: CanvasRenderingContext2D) => void): Uint8Array {
 /** Edge strokes inside the face oval (or a 1.3x enlarged region when segmentation is missing), away from existing strokes. */
 function extraEdges(an: Analysis, lm: Landmark[], existing: TStroke[], keep: number, pct: number, enlarged: boolean): TStroke[] {
   const key = `extra:${keep}:${pct}:${enlarged}:${existing.length}`;
+  const ymax = (headMetrics(an)?.line ?? an.H) / an.H; // no edge strokes on the clothes
   const cached = an.cache.get(key) as TStroke[] | undefined;
   if (cached) return cached;
   let poly = FACE_OVAL.map((i) => ({ x: lm[i].x * AW, y: lm[i].y * AH }));
@@ -344,7 +380,7 @@ function extraEdges(an: Analysis, lm: Landmark[], existing: TStroke[], keep: num
       ctx.stroke();
     }
   });
-  const edges = edgeStrokes(an.canvas, { keep, pct, minLen: 12, minEdge: 3, normalize: true, inside: (x, y) => inside[y * AW + x] === 1, exclude });
+  const edges = edgeStrokes(an.canvas, { keep, pct, minLen: 12, minEdge: 3, normalize: true, inside: (x, y) => inside[y * AW + x] === 1 && y / AH < ymax, exclude });
   const out: TStroke[] = edges.map((pts) => ({ pts, kind: enlarged ? "hair" : "face", w: enlarged ? W_HAIR : W_EXTRA }));
   an.cache.set(key, out);
   return out;
@@ -358,13 +394,18 @@ export function isClearFace(strokes: Stroke[]): boolean {
 // ---------------------------------------------------------------- the portrait
 export function buildPortrait(an: Analysis, s: PortraitSettings): Portrait {
   const lm = hasLandmarks(an);
+  const L = s.layers;
   const detailed = s.detail !== "simple";
-  const strokes: TStroke[] = [...silhouetteStrokes(an)];
+  const strokes: TStroke[] = [];
   let ok = true;
   let glasses = false;
   let glassesScore = 0;
+  let glassesMode: LensMode | "none" = "none";
+  let glassesDebug: PortraitInfo["glassesDebug"] = null;
   let hairN = 0;
   let extraN = 0;
+
+  if (L.silhouette) strokes.push(...silhouetteStrokes(an));
 
   if (!lm) {
     // No landmarks (model failed or no face): plain edge strokes, accepted only if they look like a face.
@@ -378,25 +419,28 @@ export function buildPortrait(an: Analysis, s: PortraitSettings): Portrait {
       inside: (x, y) => ((x / AW - 0.5) / 0.4) ** 2 + ((y / AH - 0.48) / 0.45) ** 2 <= 1,
     });
     ok = isClearFace(edges);
-    strokes.push(...edges.map((pts) => ({ pts, kind: "face" as const, w: 8 })));
+    if (L.face) strokes.push(...edges.map((pts) => ({ pts, kind: "face" as const, w: 8 })));
   } else {
     const lower = lowerArc(lm);
-    const boundary = an.masks && detailed ? boundaryStrokes(an, lm, lower) : [];
-    strokes.push(...boundary, faceOval(an, lm, boundary.length ? lower : null), ...featureStrokes(an, lm));
-
+    if (L.face) {
+      const boundary = an.masks && detailed ? boundaryStrokes(an, lm, lower) : [];
+      strokes.push(...boundary, faceOval(an, lm, boundary.length ? lower : null), ...featureStrokes(an, lm));
+    }
     const gl = detectGlasses(an, lm);
     glassesScore = gl.score;
-    if (s.glasses === "on" || (s.glasses === "auto" && detailed && gl.present)) {
-      strokes.push(...glassesStrokes(gl, s.glasses === "on"));
+    if (L.glasses && (s.glasses === "on" || (s.glasses === "auto" && detailed && gl.present))) {
+      strokes.push(...glassesStrokes(gl));
       glasses = true;
+      glassesMode = gl.mode;
+      glassesDebug = gl.debug;
     }
-    if (an.masks && s.hair && detailed) {
-      const hs = hairStrokes(an, s.detail === "max" ? 16 : 10);
+    if (L.hair && an.masks && detailed) {
+      const hs = hairStrokes(an, s.detail === "max" ? 10 : 6, silhouetteStrokes(an).map((x) => x.pts));
       strokes.push(...hs);
       hairN = hs.length;
     }
-    if (s.detail === "max" || (!an.masks && detailed)) {
-      const enlarged = !an.masks;
+    const enlarged = !an.masks;
+    if ((s.detail === "max" && L.face) || (enlarged && detailed && L.hair)) {
       const ex = extraEdges(an, lm, strokes, s.detail === "max" ? 14 : 8, s.detail === "max" ? 0.12 : 0.08, enlarged);
       strokes.push(...ex);
       extraN = ex.length;
@@ -410,8 +454,8 @@ export function buildPortrait(an: Analysis, s: PortraitSettings): Portrait {
     ok,
     strokes: ordered,
     path: buildLine(ordered),
-    base: buildRelief(an),
-    info: { glasses, glassesScore, hairStrokes: hairN, extraStrokes: extraN, model: lm && an.masks ? "ok" : "fallback", counts },
+    base: L.tonal ? buildRelief(an) : null,
+    info: { glasses, glassesScore, glassesMode, glassesDebug, hairStrokes: hairN, extraStrokes: extraN, model: lm && an.masks ? "ok" : "fallback", counts },
   };
 }
 

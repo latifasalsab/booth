@@ -25,6 +25,8 @@ export interface TStroke {
   kind: StrokeKind;
   w: number;
   wm?: number[];
+  /** When every stroke of a kind has seq, they are drawn in this order and direction (no nearest-neighbor). */
+  seq?: number;
 }
 /** Drawing order of the single continuous line. */
 export const KIND_ORDER: StrokeKind[] = ["silhouette", "boundary", "face", "brow", "eye", "glasses", "nose", "lips", "hair"];
@@ -120,6 +122,12 @@ export function orderTagged(strokes: TStroke[]): TStroke[] {
   let cur: Pt = { x: 0.5, y: 0 };
   for (const kind of KIND_ORDER) {
     const group = strokes.filter((s) => s.kind === kind && s.pts.length > 1).map((s) => ({ ...s, pts: s.pts.slice(), wm: s.wm?.slice() }));
+    if (group.length > 1 && group.every((s) => s.seq !== undefined)) {
+      group.sort((a, b) => (a.seq as number) - (b.seq as number));
+      for (const s of group) out.push(s);
+      cur = group[group.length - 1].pts[group[group.length - 1].pts.length - 1];
+      continue;
+    }
     while (group.length) {
       let bi = 0;
       let bj = 0;

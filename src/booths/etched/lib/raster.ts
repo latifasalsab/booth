@@ -138,3 +138,86 @@ export function trace(skel: Uint8Array, w: number, h: number): Pt[][] {
   }
   return paths;
 }
+
+/** Background (0) pixels that cannot reach the image border (4-neighborhood) become 1. */
+export function fillHoles(mask: Uint8Array, w: number, h: number): Uint8Array {
+  const out = mask.slice();
+  const seen = new Uint8Array(mask.length);
+  const stack: number[] = [];
+  const push = (i: number) => {
+    if (!mask[i] && !seen[i]) {
+      seen[i] = 1;
+      stack.push(i);
+    }
+  };
+  for (let x = 0; x < w; x++) {
+    push(x);
+    push((h - 1) * w + x);
+  }
+  for (let y = 0; y < h; y++) {
+    push(y * w);
+    push(y * w + w - 1);
+  }
+  while (stack.length) {
+    const i = stack.pop() as number;
+    const x = i % w;
+    const y = (i / w) | 0;
+    if (x > 0) push(i - 1);
+    if (x < w - 1) push(i + 1);
+    if (y > 0) push(i - w);
+    if (y < h - 1) push(i + w);
+  }
+  for (let i = 0; i < out.length; i++) if (!out[i] && !seen[i]) out[i] = 1;
+  return out;
+}
+
+/** Keeps only the largest 8-connected component. */
+export function largestComponent(mask: Uint8Array, w: number, h: number): Uint8Array {
+  const label = new Int32Array(mask.length);
+  let next = 0;
+  let bestLabel = 0;
+  let bestSize = 0;
+  const stack: number[] = [];
+  for (let s = 0; s < mask.length; s++) {
+    if (!mask[s] || label[s]) continue;
+    next++;
+    let size = 0;
+    label[s] = next;
+    stack.push(s);
+    while (stack.length) {
+      const i = stack.pop() as number;
+      size++;
+      const x = i % w;
+      const y = (i / w) | 0;
+      for (let dy = -1; dy <= 1; dy++)
+        for (let dx = -1; dx <= 1; dx++) {
+          const xx = x + dx;
+          const yy = y + dy;
+          if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+          const j = yy * w + xx;
+          if (mask[j] && !label[j]) {
+            label[j] = next;
+            stack.push(j);
+          }
+        }
+    }
+    if (size > bestSize) {
+      bestSize = size;
+      bestLabel = next;
+    }
+  }
+  return Uint8Array.from(label, (l) => (l === bestLabel && l !== 0 ? 1 : 0));
+}
+
+/**
+ * Cleans a soft mask: threshold, morphological closing (box radius closeR), hole filling, largest component only,
+ * then a Gaussian-like blur (3 box passes of radius blurR, sigma about 3.5 px for blurR = 3). Contour the result at 0.5.
+ */
+export function cleanMask(soft: Float32Array, w: number, h: number, o: { closeR: number; blurR: number; passes?: number; level?: number }): Float32Array {
+  let m: Uint8Array = Uint8Array.from(soft, (v) => (v >= (o.level ?? 0.5) ? 1 : 0));
+  if (o.closeR > 0) m = erode(dilate(m, w, h, o.closeR), w, h, o.closeR);
+  m = largestComponent(fillHoles(m, w, h), w, h);
+  let f: Float32Array = Float32Array.from(m);
+  for (let i = 0; i < (o.passes ?? 3); i++) f = boxBlur(f, w, h, o.blurR);
+  return f;
+}
