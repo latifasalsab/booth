@@ -2,7 +2,7 @@
 /**
  * Left-side media area for CAMERA, COUNTDOWN and REVIEW: live preview or captured photo sitting directly on the
  * page background (rounded, drop-shadow), oval face guide, live dot, 3-2-1 digits and the capture flash.
- * Never mirrored.
+ * The preview is never mirrored unless the user turns on Flip view.
  */
 import type { ReactNode, RefObject } from "react";
 import type { CameraStatus } from "../hooks/useCamera";
@@ -16,13 +16,15 @@ interface Props {
   status: CameraStatus;
   /** Optional layer drawn over the media (the ?debug=1 overlay). */
   overlay?: ReactNode;
+  /** Explicit user toggle: show the preview flipped horizontally. */
+  flip?: boolean;
 }
 
-export default function CameraStage({ mode, videoRef, photoUrl, count, flash, status, overlay }: Props) {
+export default function CameraStage({ mode, videoRef, photoUrl, count, flash, status, overlay, flip = false }: Props) {
   const review = mode === "review";
   return (
     <div className="etb-shadow relative overflow-hidden rounded-[22px] bg-black/50" style={{ aspectRatio: "4 / 5", height: "100%", maxWidth: "100%" }}>
-      {!review && <video ref={videoRef} playsInline muted autoPlay className="h-full w-full object-cover" aria-label="Camera preview" />}
+      {!review && <video ref={videoRef} playsInline muted autoPlay className="h-full w-full object-cover" aria-label="Camera preview" style={flip ? { transform: "scaleX(-1)" } : undefined} />}
       {review && photoUrl && (
         // eslint-disable-next-line @next/next/no-img-element
         <img src={photoUrl} alt="Your captured photo" className="h-full w-full object-cover" />

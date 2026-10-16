@@ -1,7 +1,8 @@
 "use client";
 /**
  * Camera access. start() asks for the front camera; stop() releases every track (also on unmount).
- * capture() returns a 4:5 portrait crop of the current frame. No mirroring anywhere.
+ * capture(flip) returns a 4:5 portrait crop of the current frame. The preview is never mirrored; the ONLY flip is the
+ * user's explicit "Flip view" toggle, and the capture is flipped the same way so the photo always matches the preview.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -23,6 +24,19 @@ export function cropToPortrait(src: CanvasImageSource, sw: number, sh: number): 
   if (sw / sh > target) cw = sh * target;
   else ch = sw / target;
   ctx.drawImage(src, (sw - cw) / 2, (sh - ch) / 2, cw, ch, 0, 0, PHOTO_W, PHOTO_H);
+  return c;
+}
+
+/** Horizontal flip of a canvas (used only for the explicit Flip view toggle). */
+export function flipCanvasX(src: HTMLCanvasElement): HTMLCanvasElement {
+  const c = document.createElement("canvas");
+  c.width = src.width;
+  c.height = src.height;
+  const ctx = c.getContext("2d");
+  if (!ctx) return src;
+  ctx.translate(src.width, 0);
+  ctx.scale(-1, 1);
+  ctx.drawImage(src, 0, 0);
   return c;
 }
 
@@ -75,10 +89,11 @@ export function useCamera() {
 
   useEffect(() => () => stop(), [stop]);
 
-  const capture = useCallback((): HTMLCanvasElement | null => {
+  const capture = useCallback((flip = false): HTMLCanvasElement | null => {
     const v = videoRef.current;
     if (!v || !v.videoWidth) return null;
-    return cropToPortrait(v, v.videoWidth, v.videoHeight);
+    const shot = cropToPortrait(v, v.videoWidth, v.videoHeight);
+    return flip ? flipCanvasX(shot) : shot;
   }, []);
 
   return { videoRef, status, start, stop, capture };
