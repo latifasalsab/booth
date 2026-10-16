@@ -50,13 +50,13 @@ export default function PolicyAccordion({ sections }: { sections: Section[] }) {
                 onClick={() => toggle(s.id)}
                 onKeyDown={(e) => onKeyDown(e, i)}
               >
-                <span className="acc-title font-display text-[clamp(24px,3vw,32px)] leading-none">{s.heading}</span>
+                <span className="acc-title t-sub">{s.heading}</span>
                 <span className="acc-plus" data-open={isOpen} aria-hidden />
               </button>
             </h3>
             <div id={`acc-panel-${s.id}`} role="region" aria-labelledby={`acc-${s.id}`} className="acc-panel" data-open={isOpen}>
               <div className="acc-inner">
-                <p className="pb-5 pr-10 leading-relaxed text-ink/70">{s.body}</p>
+                <p className="t-body pb-5 pr-10 text-ink/80">{s.body}</p>
               </div>
             </div>
           </div>

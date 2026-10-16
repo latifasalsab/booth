@@ -3,7 +3,7 @@
  * Ambient dots backdrop for the Policy page. Parses braille art (lib/brailleDots.ts) into dots and draws them on a
  * fixed, DPR-aware canvas: dots assemble from random offsets (~1.2s), shimmer and drift slowly, grow and tint lime
  * near the pointer, and ripple gently with scroll velocity (lib/scrollState.ts). Capped at 30fps, paused when the
- * tab is hidden, a single static frame with prefers-reduced-motion. Everything is cleaned up on unmount.
+ * tab is hidden, a single static frame with prefers-reduced-motion. intensity (0-1) tones the whole art down. Everything is cleaned up on unmount.
  */
 import { useEffect, useRef } from "react";
 import { getScrollVelocity } from "@/lib/scrollState";
@@ -17,7 +17,7 @@ const BUCKETS = 8;
 const TAU = Math.PI * 2;
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
 
-export default function DotsBackdrop({ art }: { art: string }) {
+export default function DotsBackdrop({ art, intensity = 1 }: { art: string; intensity?: number }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -92,7 +92,7 @@ export default function DotsBackdrop({ art }: { art: string }) {
       left = desktop ? W - aw - W * 0.04 : (W - aw) / 2;
       top = (H - ah) / 2;
       radius = clamp(scale * 0.45, 1.2, 1.6);
-      alphaK = desktop ? 1 : 0.18 / 0.35;
+      alphaK = (desktop ? 1 : 0.18 / 0.35) * intensity;
       stride = W < 640 && n > 6000 ? 2 : 1;
     };
 
@@ -194,7 +194,7 @@ export default function DotsBackdrop({ art }: { art: string }) {
       document.documentElement.removeEventListener("pointerleave", onLeave);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [art]);
+  }, [art, intensity]);
 
   return <canvas ref={canvasRef} aria-hidden className="pointer-events-none fixed left-0 top-0 z-0" />;
 }

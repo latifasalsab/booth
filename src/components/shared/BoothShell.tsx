@@ -13,7 +13,7 @@ export default function BoothShell({ config, children }: { config: BoothConfig; 
   return (
     <SoundProvider>
       <div data-booth={config.slug} className={`${config.fontClassName} relative min-h-dvh bg-bg font-ui text-ink`}>
-        <GrainBackground opacity={config.grain?.opacity} grid={config.grain?.grid} />
+        <GrainBackground opacity={config.grain?.opacity} pattern={config.grain?.pattern} />
         <Navbar slug={config.slug} name={config.name} nav={config.nav} wordmark={config.wordmark} />
         <div className="relative z-10">{children}</div>
       </div>

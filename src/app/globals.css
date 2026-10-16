@@ -68,6 +68,11 @@ body {
   }
 }
 
+/* Slow diagonal drift for the "stripes" background pattern. 59.4px = 6 stripe periods (14px at 135deg), so it loops seamlessly. */
+@keyframes pattern-drift { to { transform: translate3d(var(--stripes-drift, 59.4px), var(--stripes-drift, 59.4px), 0); } }
+.pattern-drift { animation: pattern-drift var(--stripes-duration, 90s) linear infinite; will-change: transform; }
+@media (prefers-reduced-motion: reduce) { .pattern-drift { animation: none; } }
+
 /* Lenis smooth scroll (only active on pages that mount <SmoothScroll />) */
 html.lenis, html.lenis body { height: auto; }
 .lenis.lenis-smooth { scroll-behavior: auto !important; }

@@ -3,7 +3,10 @@
  * Etched Booth main screen and state machine:
  * IDLE -> CAMERA -> COUNTDOWN -> REVIEW -> ETCH -> EDIT -> PRINT (upload is an alternative to the camera at IDLE).
  * Left: the plate / camera stage directly on the page. Right: the steel kiosk card. Fixed to 100dvh, no scroll.
- * Everything runs on the device; nothing is uploaded.
+ * The photo is oriented exactly as the preview (optional Flip view) BEFORE analysis; each photo is analyzed ONCE
+ * (landmarks, segmentation, edge maps) and cached; Detail, Glasses and Layers only recompute strokes from that cache.
+ * User elements (stars, text, lines ...) have a full transform (move, scale, rotate, pinch) with undo/redo.
+ * Everything runs on the device.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useReducedMotion } from "framer-motion";
@@ -11,16 +14,18 @@ import type { SoundMap } from "@/types";
 import { useCurtain } from "@/components/shared/PageCurtain";
 import { cropToPortrait, useCamera } from "../hooks/useCamera";
 import { useEmbossProgress } from "../hooks/useEmbossProgress";
-import { getFaceStrokes, isClearFace, sampleFaceStrokes, type Detail } from "../lib/faceStrokes";
-import { createHeightCanvas, hitTest, lineDeco, makeDeco, paintHeightMap, type Deco, type DecoKind } from "../lib/heightMap";
+import { analyzePhoto, type Analysis } from "../lib/analysis";
+import { clampDeco, decoFrame, hitHandle, hitTest, lineDeco, makeDeco, normAngle, setDecoFonts, type Deco, type DecoKind, type FontKey } from "../lib/elements";
+import { buildPortrait, DEFAULT_LAYERS, DEFAULT_SETTINGS, MODE_NOTE, sampleFaceStrokes, type Detail, type GlassesMode, type Layers, type Portrait, type PortraitSettings } from "../lib/faceStrokes";
+import { createHeightCanvas, HeightPainter, HH, HW } from "../lib/heightMap";
 import type { MetalKey } from "../lib/plateScene";
 import { configureSound, initEmbossSound, play } from "../lib/sound";
-import { buildSingleLine, pointAt, type LinePath, type Pt } from "../lib/strokePath";
+import { buildSingleLine, etchDuration, pointAt, type Pt } from "../lib/strokePath";
 import CameraStage from "./CameraStage";
+import DebugOverlay from "./DebugOverlay";
 import KioskPanel from "./KioskPanel";
 import PickupView from "./PickupView";
 import PlateCanvas, { type PenState, type PlateHandle, type SurfaceEvent } from "./PlateCanvas";
-import Wordmark from "./Wordmark";
 import CameraStep from "./steps/CameraStep";
 import CountdownStep from "./steps/CountdownStep";
 import EditStep from "./steps/EditStep";
@@ -39,11 +44,29 @@ const LABELS: Record<Step, string> = {
   EDIT: "ADJUST AND PRINT",
   PRINT: "PRINTING",
 };
-const ETCH_MS = 5000;
+const IDLE_MS = 5000;
 const PLATES_KEY = "etched.plates";
 const NO_FACE = "We couldn't find a clear face. Try better light.";
+const YK = HW / HH;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-const clamp01 = (v: number) => Math.min(0.95, Math.max(0.05, v));
+const noLayers = (l: Layers) => !(l.silhouette || l.face || l.glasses || l.hair || l.tonal);
+
+type Gesture =
+  | { mode: "move"; id: number; ox: number; oy: number; moved: boolean }
+  | { mode: "scale"; id: number; d0: number; s0: number }
+  | { mode: "rotate"; id: number }
+  | { mode: "pinch"; id: number; s0: number; r0: number };
+
+/** ?debug=1: console.table of what was detected. */
+function logDetections(p: Portrait) {
+  console.table([
+    { detection: "glasses", value: p.info.glasses ? p.info.glassesMode : "no", detail: `score ${p.info.glassesScore.toFixed(2)}` },
+    { detection: "hair strokes", value: p.info.hairStrokes, detail: "" },
+    { detection: "extra edge strokes", value: p.info.extraStrokes, detail: "" },
+    { detection: "model", value: p.info.model, detail: "landmarks + segmentation" },
+    { detection: "strokes by kind", value: JSON.stringify(p.info.counts), detail: "" },
+  ]);
+}
 
 export default function EtchedBooth({ sound }: { sound: SoundMap }) {
   const curtain = useCurtain();
@@ -55,51 +78,71 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
   stepRef.current = step;
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [modeNote, setModeNote] = useState<string | null>(null);
   const [count, setCount] = useState<number | null>(null);
   const [flash, setFlash] = useState(false);
+  const [flip, setFlip] = useState(false);
+  const flipRef = useRef(false);
+  flipRef.current = flip;
   const [photoUrl, setPhotoUrl] = useState<string | null>(null);
   const photoRef = useRef<HTMLCanvasElement | null>(null);
   const [uiProgress, setUiProgress] = useState(0);
+  const [analyzing, setAnalyzing] = useState(false);
   const [plates, setPlates] = useState(0);
   const platesRef = useRef(0);
+  const [debug, setDebug] = useState(false);
+  const debugRef = useRef(false);
+  const [dbg, setDbg] = useState<{ an: Analysis; portrait: Portrait } | null>(null);
+  const analysisRef = useRef<{ promise: Promise<Analysis>; value: Analysis | null } | null>(null);
 
-  // Edit settings
-  const [detail, setDetail] = useState<Detail>("low");
+  // Portrait settings
+  const [detail, setDetail] = useState<Detail>(DEFAULT_SETTINGS.detail);
+  const [glassesMode, setGlassesMode] = useState<GlassesMode>(DEFAULT_SETTINGS.glasses);
+  const [layers, setLayers] = useState<Layers>(DEFAULT_LAYERS);
+  const layersBackup = useRef<Layers>(DEFAULT_LAYERS);
+  const settingsRef = useRef<PortraitSettings>(DEFAULT_SETTINGS);
   const [size, setSize] = useState(0.5);
   const [depth, setDepth] = useState(0.5);
   const [metal, setMetal] = useState<MetalKey>("silver");
   const [bw, setBw] = useState(false);
+
+  // Own elements
   const [tool, setTool] = useState<DecoKind | null>(null);
   const [textValue, setTextValue] = useState("Hello");
+  const [textFont, setTextFont] = useState<FontKey>("anton");
   const [decos, setDecos] = useState<Deco[]>([]);
   const decosRef = useRef<Deco[]>([]);
   decosRef.current = decos;
   const [history, setHistory] = useState<Deco[][]>([]);
+  const [future, setFuture] = useState<Deco[][]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const selectedIdRef = useRef<number | null>(null);
+  selectedIdRef.current = selectedId;
   const [print, setPrint] = useState<{ photoUrl: string; plate: HTMLCanvasElement } | null>(null);
 
   // Plate drawing state lives in refs so the animation never re-renders React.
   const heightCanvas = useMemo(() => (typeof document === "undefined" ? null : createHeightCanvas()), []);
+  const painter = useMemo(() => new HeightPainter(), []);
   const versionRef = useRef(0);
   const penRef = useRef<PenState>({ x: 0, y: 0, on: false });
   const plateRef = useRef<PlateHandle>(null);
-  const thickness = 6 + size * 12;
-  const dataRef = useRef<{ path: LinePath | null; decos: Deco[]; thickness: number }>({ path: null, decos: [], thickness });
+  const progressRef = useRef(0);
+  const sizeK = 0.6 + size * 0.8; // Size slider scales every stroke width
 
   const repaint = useCallback(
     (p: number) => {
       if (!heightCanvas) return;
-      const d = dataRef.current;
-      paintHeightMap(heightCanvas, d.path, p, d.decos, d.thickness);
+      painter.paint(heightCanvas, p, decosRef.current);
       versionRef.current++;
     },
-    [heightCanvas],
+    [heightCanvas, painter],
   );
 
   const onFrame = useCallback(
     (p: number) => {
+      progressRef.current = p;
       repaint(p);
-      const path = dataRef.current.path;
+      const path = painter.path;
       if (path) {
         const pt = pointAt(path, p);
         penRef.current = { x: pt.x, y: pt.y, on: p > 0 && p < 1 };
@@ -107,16 +150,33 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
       const pct = Math.round(p * 100);
       setUiProgress((prev) => (prev === pct ? prev : pct));
     },
-    [repaint],
+    [painter, repaint],
   );
   const etch = useEmbossProgress(onFrame, false);
-  const idleLoop = useEmbossProgress(onFrame, true);
+  const quiet = useEmbossProgress(onFrame, true); // idle loop and relief replays: no global progress, no sound
 
   useEffect(() => {
-    dataRef.current.decos = decos;
-    dataRef.current.thickness = thickness;
-    if (step === "EDIT") repaint(1);
-  }, [decos, thickness, step, repaint]);
+    painter.setSizeK(sizeK);
+    if (step === "EDIT") repaint(progressRef.current);
+  }, [painter, sizeK, decos, step, repaint]);
+
+  useEffect(() => {
+    const on = new URLSearchParams(window.location.search).get("debug") === "1";
+    debugRef.current = on;
+    setDebug(on);
+  }, []);
+
+  // Canvas text needs concrete family names: read them from the booth's font variables.
+  useEffect(() => {
+    const root = document.querySelector('[data-booth="etched"]');
+    if (!root) return;
+    const cs = getComputedStyle(root);
+    const fam = { anton: cs.getPropertyValue("--font-display").trim(), jakarta: cs.getPropertyValue("--font-ui").trim(), doto: cs.getPropertyValue("--font-dot").trim() };
+    setDecoFonts(fam);
+    Promise.all(Object.values(fam).filter(Boolean).map((f) => document.fonts.load(`40px ${f}`).catch(() => [])))
+      .then(() => repaint(progressRef.current))
+      .catch(() => {});
+  }, [repaint]);
 
   // Sound wiring and plate counter
   useEffect(() => {
@@ -140,11 +200,11 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
     if (step !== "IDLE") return;
     let alive = true;
     let timer = 0;
-    dataRef.current.path = buildSingleLine(sampleFaceStrokes());
-    dataRef.current.decos = [];
+    painter.setBase(null);
+    painter.setPath(buildSingleLine(sampleFaceStrokes(), 9));
     const run = () => {
       if (!alive) return;
-      idleLoop.start(reduced ? 900 : ETCH_MS, () => {
+      quiet.start(reduced ? 900 : IDLE_MS, () => {
         penRef.current = { ...penRef.current, on: false };
         timer = window.setTimeout(run, 2400);
       });
@@ -153,21 +213,41 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
     return () => {
       alive = false;
       window.clearTimeout(timer);
-      idleLoop.cancel();
+      quiet.cancel();
       penRef.current = { x: 0, y: 0, on: false };
     };
-  }, [step, idleLoop, reduced]);
+  }, [step, quiet, reduced, painter]);
 
   const acceptPhoto = useCallback((canvas: HTMLCanvasElement) => {
-    photoRef.current = canvas;
+    photoRef.current = canvas; // already oriented exactly like the preview (or an unflipped upload)
     setPhotoUrl(canvas.toDataURL("image/jpeg", 0.92));
     setError(null);
+    setModeNote(null);
+    setDbg(null);
     setStep("REVIEW");
+    // Analyze once, in the background: landmarks, segmentation, edge maps. Everything downstream shares this orientation.
+    const slot = { promise: analyzePhoto(canvas), value: null as Analysis | null };
+    analysisRef.current = slot;
+    slot.promise
+      .then((an) => {
+        if (analysisRef.current !== slot) return;
+        slot.value = an;
+        setModeNote(an.masks ? null : MODE_NOTE);
+        if (debugRef.current) {
+          const portrait = buildPortrait(an, settingsRef.current);
+          setDbg({ an, portrait });
+          logDetections(portrait);
+        }
+      })
+      .catch(() => {
+        if (analysisRef.current === slot) analysisRef.current = null;
+      });
   }, []);
 
   const startCamera = useCallback(async () => {
     setNotice(null);
     setError(null);
+    analysisRef.current = null;
     setStep("CAMERA");
     const s = await camStart();
     if (stepRef.current !== "CAMERA" || s === "idle") return;
@@ -193,13 +273,13 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
       setCount(n);
       play("countdown");
       await sleep(900);
-      if ((stepRef.current as Step) !== "COUNTDOWN") return;
+      if (stepRef.current !== "COUNTDOWN") return;
     }
     setCount(null);
     play("shutter");
     setFlash(true);
     window.setTimeout(() => setFlash(false), 220);
-    const shot = camCapture();
+    const shot = camCapture(flipRef.current); // flipped exactly like the preview when Flip view is on
     camStop();
     if (!shot) {
       setStep("IDLE");
@@ -214,7 +294,7 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
       const url = URL.createObjectURL(file);
       const img = new Image();
       img.onload = () => {
-        acceptPhoto(cropToPortrait(img, img.naturalWidth, img.naturalHeight));
+        acceptPhoto(cropToPortrait(img, img.naturalWidth, img.naturalHeight)); // uploads are never flipped
         URL.revokeObjectURL(url);
       };
       img.onerror = () => {
@@ -226,87 +306,168 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
     [acceptPhoto],
   );
 
-  const continueToEtch = useCallback(() => {
-    const photo = photoRef.current;
-    if (!photo) return;
-    const strokes = getFaceStrokes(photo, detail);
-    if (!isClearFace(strokes)) {
+  const continueToEtch = useCallback(async () => {
+    const slot = analysisRef.current;
+    if (!slot || analyzing) return;
+    setAnalyzing(true);
+    setError(null);
+    let an: Analysis;
+    try {
+      an = await slot.promise;
+    } catch {
+      setAnalyzing(false);
       setError(NO_FACE);
       return;
     }
-    setError(null);
-    dataRef.current.path = buildSingleLine(strokes);
-    dataRef.current.decos = [];
+    setAnalyzing(false);
+    if (stepRef.current !== "REVIEW" || analysisRef.current !== slot) return;
+    const settings = { detail, glasses: glassesMode, layers };
+    settingsRef.current = settings;
+    const portrait = buildPortrait(an, settings);
+    if (!portrait.ok) {
+      setError(NO_FACE);
+      return;
+    }
+    painter.setBase(portrait.base);
+    painter.setPath(portrait.path);
     setDecos([]);
+    decosRef.current = [];
     setHistory([]);
+    setFuture([]);
     setSelectedId(null);
     setStep("ETCH");
-    etch.start(reduced ? 1200 : ETCH_MS, () => {
+    etch.start(reduced ? 1200 : etchDuration(portrait.path), () => {
       penRef.current = { ...penRef.current, on: false };
       setStep("EDIT");
     });
-  }, [detail, etch, reduced]);
+  }, [analyzing, detail, glassesMode, layers, painter, etch, reduced]);
 
-  const changeDetail = useCallback(
-    (d: Detail) => {
-      setDetail(d);
-      const photo = photoRef.current;
-      if (!photo) return;
-      const strokes = getFaceStrokes(photo, d);
-      if (isClearFace(strokes)) {
-        dataRef.current.path = buildSingleLine(strokes);
+  /** Recompute strokes from the cached analysis. replay = short relief replay, otherwise an instant update. */
+  const rebuild = useCallback(
+    (next: PortraitSettings, replay: boolean) => {
+      settingsRef.current = next;
+      const an = analysisRef.current?.value;
+      if (!an) return;
+      const portrait = buildPortrait(an, next);
+      if (!portrait.ok) return;
+      painter.setBase(portrait.base);
+      painter.setPath(portrait.path);
+      if (replay) {
+        quiet.start(reduced ? 300 : 1500, () => {
+          penRef.current = { ...penRef.current, on: false };
+        });
+      } else {
+        quiet.cancel();
+        penRef.current = { ...penRef.current, on: false };
+        progressRef.current = 1;
         repaint(1);
       }
     },
-    [repaint],
+    [painter, quiet, reduced, repaint],
   );
+  const changeDetail = (d: Detail) => {
+    setDetail(d);
+    rebuild({ detail: d, glasses: glassesMode, layers }, true);
+  };
+  const changeGlasses = (g: GlassesMode) => {
+    setGlassesMode(g);
+    rebuild({ detail, glasses: g, layers }, true);
+  };
+  const applyLayers = (next: Layers) => {
+    setLayers(next);
+    rebuild({ detail, glasses: glassesMode, layers: next }, false);
+  };
+  const changeLayer = (k: keyof Layers, v: boolean) => applyLayers({ ...layers, [k]: v });
+  const blankPlate = () => {
+    if (!noLayers(layers)) layersBackup.current = layers;
+    applyLayers({ silhouette: false, face: false, glasses: false, hair: false, tonal: false });
+  };
+  const restoreFace = () => applyLayers(noLayers(layersBackup.current) ? DEFAULT_LAYERS : layersBackup.current);
 
-  // Plate editing
+  // ------------------------------------------------------------ own elements
   const nextId = useRef(1);
-  const dragRef = useRef<{ id: number; ox: number; oy: number; moved: boolean } | null>(null);
+  const gestureRef = useRef<Gesture | null>(null);
   const draftRef = useRef<{ id: number; pts: Pt[] } | null>(null);
-  const pushHistory = useCallback(() => setHistory((h) => [...h.slice(-29), decosRef.current]), []);
+  const coalesce = useRef({ key: "", t: 0 });
+
+  const pushHistory = useCallback(() => {
+    setHistory((h) => [...h.slice(-29), decosRef.current]);
+    setFuture([]);
+  }, []);
+  /** Slider drags and typing become ONE undo step (same key within 800 ms). */
+  const touch = useCallback(
+    (key: string) => {
+      const now = Date.now();
+      if (coalesce.current.key !== key || now - coalesce.current.t > 800) pushHistory();
+      coalesce.current = { key, t: now };
+    },
+    [pushHistory],
+  );
+  const patchDeco = useCallback((id: number, patch: Partial<Deco> | ((d: Deco) => Deco)) => {
+    setDecos((list) => list.map((d) => (d.id === id ? clampDeco(typeof patch === "function" ? patch(d) : { ...d, ...patch }) : d)));
+  }, []);
   const upsert = (list: Deco[], d: Deco) => (list.some((x) => x.id === d.id) ? list.map((x) => (x.id === d.id ? d : x)) : [...list, d]);
 
   const onSurface = useCallback(
     (e: SurfaceEvent) => {
+      const list = decosRef.current;
       if (e.type === "down") {
         const pos = e.pos;
         if (!pos) return setSelectedId(null);
+        const sel = list.find((d) => d.id === selectedIdRef.current);
+        if (!tool && sel) {
+          const h = hitHandle(sel, pos);
+          if (h === "scale") {
+            pushHistory();
+            gestureRef.current = { mode: "scale", id: sel.id, d0: Math.max(0.01, Math.hypot(pos.x - sel.x, (pos.y - sel.y) / YK)), s0: sel.scale };
+            return;
+          }
+          if (h === "rotate") {
+            pushHistory();
+            gestureRef.current = { mode: "rotate", id: sel.id };
+            return;
+          }
+        }
         if (tool === "line") {
           pushHistory();
           setSelectedId(null);
           draftRef.current = { id: nextId.current++, pts: [pos] };
         } else if (tool) {
           pushHistory();
-          const d = makeDeco(nextId.current++, tool, pos.x, pos.y, textValue);
+          const d = makeDeco(nextId.current++, tool, pos.x, pos.y, textValue, textFont);
           setDecos((p) => [...p, d]);
           setSelectedId(d.id);
           setTool(null);
         } else {
-          const hit = hitTest(decosRef.current, pos);
+          const hit = hitTest(list, pos);
           setSelectedId(hit ? hit.id : null);
-          dragRef.current = hit ? { id: hit.id, ox: pos.x - hit.x, oy: pos.y - hit.y, moved: false } : null;
+          gestureRef.current = hit ? { mode: "move", id: hit.id, ox: pos.x - hit.x, oy: pos.y - hit.y, moved: false } : null;
         }
       } else if (e.type === "move" && e.pos) {
         const pos = e.pos;
         const draft = draftRef.current;
         if (draft) {
           const last = draft.pts[draft.pts.length - 1];
-          if (Math.hypot(pos.x - last.x, (pos.y - last.y) * 1.25) > 0.008) {
+          if (Math.hypot(pos.x - last.x, (pos.y - last.y) / YK) > 0.008) {
             draft.pts.push(pos);
             const d = lineDeco(draft.id, draft.pts);
             setDecos((p) => upsert(p, d));
           }
           return;
         }
-        const drag = dragRef.current;
-        if (drag) {
-          if (!drag.moved) {
+        const g = gestureRef.current;
+        if (!g) return;
+        if (g.mode === "move") {
+          if (!g.moved) {
             pushHistory();
-            drag.moved = true;
+            g.moved = true;
           }
-          setDecos((p) => p.map((d) => (d.id === drag.id ? { ...d, x: clamp01(pos.x - drag.ox), y: clamp01(pos.y - drag.oy) } : d)));
+          patchDeco(g.id, { x: pos.x - g.ox, y: pos.y - g.oy });
+        } else if (g.mode === "scale") {
+          const d = list.find((x) => x.id === g.id);
+          if (d) patchDeco(g.id, { scale: (g.s0 * Math.hypot(pos.x - d.x, (pos.y - d.y) / YK)) / g.d0 });
+        } else if (g.mode === "rotate") {
+          patchDeco(g.id, (d) => ({ ...d, rot: normAngle(Math.atan2((pos.y - d.y) / YK, pos.x - d.x) + Math.PI / 2) }));
         }
       } else if (e.type === "up") {
         const draft = draftRef.current;
@@ -317,28 +478,62 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
             draft.pts.length < 3
               ? Array.from({ length: 25 }, (_, i) => ({ x: s.x - 0.09 + (i / 24) * 0.18, y: s.y + Math.sin((i / 24) * Math.PI * 3) * 0.025 }))
               : draft.pts;
-          const d = lineDeco(draft.id, pts);
+          const d = clampDeco(lineDeco(draft.id, pts));
           setDecos((p) => upsert(p, d));
           setSelectedId(d.id);
           setTool(null);
         }
-        dragRef.current = null;
+        gestureRef.current = null;
+      } else if (e.type === "pinchStart") {
+        const sel = list.find((d) => d.id === selectedIdRef.current);
+        if (sel) {
+          pushHistory();
+          gestureRef.current = { mode: "pinch", id: sel.id, s0: sel.scale, r0: sel.rot };
+        }
+      } else if (e.type === "pinch") {
+        const g = gestureRef.current;
+        if (g && g.mode === "pinch") patchDeco(g.id, { scale: g.s0 * (e.scale ?? 1), rot: normAngle(g.r0 + (e.rot ?? 0)) });
+      } else if (e.type === "pinchEnd") {
+        gestureRef.current = null;
       }
     },
-    [tool, textValue, pushHistory],
+    [tool, textValue, textFont, pushHistory, patchDeco],
   );
 
+  const onElement = (patch: Partial<Deco>, key: string) => {
+    const id = selectedIdRef.current;
+    if (patch.font) setTextFont(patch.font);
+    if (id == null) return;
+    touch(`${id}:${key}`);
+    patchDeco(id, patch);
+  };
+  const toFront = () => {
+    const id = selectedIdRef.current;
+    if (id == null) return;
+    pushHistory();
+    setDecos((p) => {
+      const d = p.find((x) => x.id === id);
+      return d ? [...p.filter((x) => x.id !== id), d] : p;
+    });
+  };
   const deleteSelected = useCallback(() => {
     if (selectedId == null) return;
     pushHistory();
     setDecos((p) => p.filter((d) => d.id !== selectedId));
     setSelectedId(null);
   }, [selectedId, pushHistory]);
-
   const undo = () => {
     if (!history.length) return;
+    setFuture((f) => [decosRef.current, ...f]);
     setDecos(history[history.length - 1]);
     setHistory(history.slice(0, -1));
+    setSelectedId(null);
+  };
+  const redo = () => {
+    if (!future.length) return;
+    setHistory((h) => [...h, decosRef.current]);
+    setDecos(future[0]);
+    setFuture(future.slice(1));
     setSelectedId(null);
   };
   const clearAll = () => {
@@ -357,11 +552,11 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [step, deleteSelected]);
 
-  // Print and restart (both run behind the page curtain)
+  // ------------------------------------------------------------ print and restart (behind the page curtain)
   const behindCurtain = useCallback(async (fn: () => void) => (curtain ? curtain.run(fn) : fn()), [curtain]);
 
   const onPrint = useCallback(async () => {
-    const plate = plateRef.current?.snapshot();
+    const plate = plateRef.current?.snapshot(); // honors layer visibility and elements: it is the plate as shown
     if (!plate || !photoUrl) return;
     await behindCurtain(() => {
       setSelectedId(null);
@@ -384,25 +579,35 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
       setPrint(null);
       setPhotoUrl(null);
       photoRef.current = null;
+      analysisRef.current = null;
+      settingsRef.current = DEFAULT_SETTINGS;
+      setDbg(null);
+      setModeNote(null);
       setDecos([]);
+      decosRef.current = [];
       setHistory([]);
+      setFuture([]);
       setSelectedId(null);
       setTool(null);
       setError(null);
       setNotice(null);
-      setDetail("low");
+      setFlip(false);
+      setDetail(DEFAULT_SETTINGS.detail);
+      setGlassesMode(DEFAULT_SETTINGS.glasses);
+      setLayers(DEFAULT_LAYERS);
+      layersBackup.current = DEFAULT_LAYERS;
       setSize(0.5);
       setDepth(0.5);
       setMetal("silver");
       setBw(false);
       penRef.current = { x: 0, y: 0, on: false };
-      dataRef.current.path = null;
       setStep("IDLE");
     });
   }, [behindCurtain, camStop]);
 
   const showMedia = step === "CAMERA" || step === "COUNTDOWN" || step === "REVIEW";
   const selected = decos.find((d) => d.id === selectedId) ?? null;
+  const frame = useMemo(() => (selected ? decoFrame(selected) : null), [selected]);
   const panelIndex = Math.max(0, PANEL_STEPS.indexOf(step));
 
   return (
@@ -419,7 +624,7 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
                 penRef={penRef}
                 metal={metal}
                 depth={depth}
-                selection={selected ? { x: selected.x, y: selected.y, r: selected.r } : null}
+                frame={frame}
                 editing={step === "EDIT"}
                 onSurface={step === "EDIT" ? onSurface : undefined}
               />
@@ -433,45 +638,55 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
                   count={count}
                   flash={flash}
                   status={camStatus}
+                  flip={flip}
+                  overlay={debug && step === "REVIEW" ? <DebugOverlay an={dbg?.an ?? null} portrait={dbg?.portrait ?? null} /> : undefined}
                 />
               </div>
             )}
           </div>
-          {step === "IDLE" && (
-            <div className="pointer-events-none absolute bottom-4 left-5 lg:bottom-7 lg:left-9">
-              <Wordmark size="sm" />
-            </div>
-          )}
         </section>
 
         <aside className="h-[46dvh] shrink-0 p-2 lg:h-dvh lg:w-[calc(clamp(320px,30vw,440px)+16px)] lg:p-4 lg:pl-0" style={{ paddingBottom: "max(8px, env(safe-area-inset-bottom))" }}>
           <KioskPanel stepIndex={panelIndex} label={LABELS[step]}>
             {step === "IDLE" && <IdleStep plates={plates} notice={notice} onStart={startCamera} onUpload={onUpload} />}
-            {step === "CAMERA" && <CameraStep ready={camStatus === "live"} onCapture={takePhoto} onCancel={cancelCamera} />}
+            {step === "CAMERA" && <CameraStep ready={camStatus === "live"} flip={flip} onFlip={setFlip} onCapture={takePhoto} onCancel={cancelCamera} />}
             {step === "COUNTDOWN" && <CountdownStep count={count} />}
-            {step === "REVIEW" && <ReviewStep error={error} onContinue={continueToEtch} onRetake={startCamera} />}
+            {step === "REVIEW" && <ReviewStep error={error} note={modeNote} busy={analyzing} onContinue={continueToEtch} onRetake={startCamera} />}
             {step === "ETCH" && <EtchStep progress={uiProgress} />}
             {(step === "EDIT" || step === "PRINT") && (
               <EditStep
+                note={modeNote}
                 tool={tool}
                 onTool={setTool}
                 textValue={textValue}
                 onText={setTextValue}
+                textFont={textFont}
+                selected={selected}
+                onElement={onElement}
+                onToFront={toFront}
                 size={size}
                 onSize={setSize}
                 depth={depth}
                 onDepth={setDepth}
                 detail={detail}
                 onDetail={changeDetail}
+                glasses={glassesMode}
+                onGlasses={changeGlasses}
+                layers={layers}
+                onLayer={changeLayer}
+                blank={noLayers(layers)}
+                onBlank={blankPlate}
+                onRestore={restoreFace}
                 metal={metal}
                 onMetal={setMetal}
                 bw={bw}
                 onBw={setBw}
-                hasSelection={selectedId !== null}
                 canUndo={history.length > 0}
+                canRedo={future.length > 0}
                 hasDecos={decos.length > 0}
                 onDelete={deleteSelected}
                 onUndo={undo}
+                onRedo={redo}
                 onClear={clearAll}
                 onPrint={onPrint}
               />

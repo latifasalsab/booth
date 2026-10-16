@@ -4,9 +4,14 @@
  * brushed + scratched roughness map, procedural gradient environment, normal map rebuilt from the height canvas
  * whenever versionRef changes, light steered by pointer/tilt. The CSS drop-shadow on the canvas (class etb-shadow)
  * makes it look like a physical plate resting on the page. snapshot() renders a tight, transparent-background image for the print.
+ * In EDIT it also draws the selected element's frame (corner handles + rotate handle) and reports pointer gestures
+ * on the plate surface: down / move / up, and two-finger pinchStart / pinch (scale, rotation) / pinchEnd.
+ * Orientation: canvas row 0 is the top of the plate and column 0 its left (texture flipY = true), uv.y is flipped back
+ * when picking, so left and right never swap.
  */
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type MutableRefObject } from "react";
 import * as THREE from "three";
+import type { Frame } from "../lib/elements";
 import { HH, HW } from "../lib/heightMap";
 import { heightToNormal } from "../lib/normalMap";
 import { buildPlate, fitCamera, FRONT_Z, makeEnvironment, PLATE_H, PLATE_W, type MetalKey } from "../lib/plateScene";
@@ -17,14 +22,13 @@ export interface PenState {
   y: number;
   on: boolean;
 }
-export interface Selection {
-  x: number;
-  y: number;
-  r: number;
-}
 export interface SurfaceEvent {
-  type: "down" | "move" | "up";
+  type: "down" | "move" | "up" | "pinchStart" | "pinch" | "pinchEnd";
   pos: Pt | null;
+  /** pinch: distance ratio since the gesture started */
+  scale?: number;
+  /** pinch: rotation (radians) since the gesture started */
+  rot?: number;
 }
 export interface PlateHandle {
   snapshot: () => HTMLCanvasElement | null;
@@ -36,7 +40,8 @@ interface Props {
   penRef: MutableRefObject<PenState>;
   metal: MetalKey;
   depth: number;
-  selection: Selection | null;
+  /** Selected element's frame (normalized plate coordinates), or null. */
+  frame: Frame | null;
   editing: boolean;
   onSurface?: (e: SurfaceEvent) => void;
   className?: string;
@@ -99,20 +104,33 @@ const PlateCanvas = forwardRef<PlateHandle, Props>(function PlateCanvas(props, r
     normalTex.anisotropy = 4;
     plate.front.material.normalMap = normalTex;
 
-    // Pen tip and selection ring (hidden in snapshots).
+    // Pen tip and selection frame (both hidden in snapshots).
     const penZ = FRONT_Z + 0.04;
     const penCore = new THREE.Mesh(new THREE.SphereGeometry(0.035, 16, 16), new THREE.MeshBasicMaterial({ color: 0xffffff }));
     const penHalo = new THREE.Mesh(
       new THREE.SphereGeometry(0.1, 16, 16),
       new THREE.MeshBasicMaterial({ color: 0xd3fb43, transparent: true, opacity: 0.3, depthWrite: false, blending: THREE.AdditiveBlending }),
     );
-    const ring = new THREE.Mesh(
-      new THREE.RingGeometry(0.97, 1, 64),
-      new THREE.MeshBasicMaterial({ color: 0xd3fb43, transparent: true, opacity: 0.95, depthTest: false }),
-    );
-    ring.renderOrder = 10;
-    penCore.visible = penHalo.visible = ring.visible = false;
-    plate.group.add(penCore, penHalo, ring);
+    const lineMat = new THREE.LineBasicMaterial({ color: 0xd3fb43, depthTest: false, transparent: true });
+    const handleMat = new THREE.MeshBasicMaterial({ color: 0xd3fb43, depthTest: false });
+    const frameGeo = new THREE.BufferGeometry();
+    frameGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(5 * 3), 3));
+    const stemGeo = new THREE.BufferGeometry();
+    stemGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(2 * 3), 3));
+    const cornerGeo = new THREE.PlaneGeometry(0.06, 0.06);
+    const rotGeo = new THREE.CircleGeometry(0.035, 24);
+    const frameLine = new THREE.Line(frameGeo, lineMat);
+    const stemLine = new THREE.Line(stemGeo, lineMat);
+    const corners = Array.from({ length: 4 }, () => new THREE.Mesh(cornerGeo, handleMat));
+    const rotHandle = new THREE.Mesh(rotGeo, handleMat);
+    const sel = new THREE.Group();
+    sel.add(frameLine, stemLine, rotHandle, ...corners);
+    sel.children.forEach((c) => {
+      c.renderOrder = 10;
+      c.frustumCulled = false;
+    });
+    penCore.visible = penHalo.visible = sel.visible = false;
+    plate.group.add(penCore, penHalo, sel);
     const toPlate = (x: number, y: number): [number, number] => [(x - 0.5) * PLATE_W, (0.5 - y) * PLATE_H];
 
     const resize = () => {
@@ -144,37 +162,72 @@ const PlateCanvas = forwardRef<PlateHandle, Props>(function PlateCanvas(props, r
     window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("deviceorientation", onOrient);
 
-    // Surface picking (EDIT step)
+    // Surface picking (EDIT step): one pointer = down/move/up, two pointers = pinch (scale + rotation).
     const ray = new THREE.Raycaster();
     const ndc = new THREE.Vector2();
-    const hit = (e: PointerEvent): Pt | null => {
+    const hit = (cx: number, cy: number): Pt | null => {
       const r = el.getBoundingClientRect();
-      ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+      ndc.set(((cx - r.left) / r.width) * 2 - 1, -((cy - r.top) / r.height) * 2 + 1);
       ray.setFromCamera(ndc, camera);
       plate.group.updateMatrixWorld(true);
       const h = ray.intersectObject(plate.front.mesh, false)[0];
       return h && h.uv ? { x: h.uv.x, y: 1 - h.uv.y } : null;
     };
+    const pointers = new Map<number, { x: number; y: number }>();
     let down = false;
+    let pinch: { d0: number; a0: number } | null = null;
+    const pair = () => {
+      const [a, b] = Array.from(pointers.values());
+      return { d: Math.hypot(b.x - a.x, b.y - a.y) || 1, a: Math.atan2(b.y - a.y, b.x - a.x) };
+    };
+    const emit = (e: SurfaceEvent) => propsRef.current.onSurface?.(e);
     const onDown = (e: PointerEvent) => {
       const p = propsRef.current;
       if (!p.editing || !p.onSurface) return;
-      const pos = hit(e);
-      if (pos) {
-        down = true;
-        el.setPointerCapture(e.pointerId);
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      el.setPointerCapture(e.pointerId);
+      if (pointers.size === 2) {
+        if (down) {
+          down = false;
+          emit({ type: "up", pos: null });
+        }
+        const g = pair();
+        pinch = { d0: g.d, a0: g.a };
+        emit({ type: "pinchStart", pos: null });
+        return;
       }
-      p.onSurface({ type: "down", pos });
+      if (pointers.size === 1) {
+        const pos = hit(e.clientX, e.clientY);
+        down = !!pos;
+        emit({ type: "down", pos });
+      }
     };
     const onMove = (e: PointerEvent) => {
+      if (!pointers.has(e.pointerId)) return;
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pinch && pointers.size >= 2) {
+        const g = pair();
+        emit({ type: "pinch", pos: null, scale: g.d / pinch.d0, rot: g.a - pinch.a0 });
+        return;
+      }
       if (!down) return;
-      const pos = hit(e);
-      if (pos) propsRef.current.onSurface?.({ type: "move", pos });
+      const pos = hit(e.clientX, e.clientY);
+      if (pos) emit({ type: "move", pos });
     };
-    const onUp = () => {
-      if (!down) return;
-      down = false;
-      propsRef.current.onSurface?.({ type: "up", pos: null });
+    const onUp = (e: PointerEvent) => {
+      if (!pointers.delete(e.pointerId)) return;
+      if (pinch) {
+        if (pointers.size < 2) {
+          pinch = null;
+          emit({ type: "pinchEnd", pos: null });
+        }
+        down = false;
+        return;
+      }
+      if (down) {
+        down = false;
+        emit({ type: "up", pos: null });
+      }
     };
     el.addEventListener("pointerdown", onDown);
     el.addEventListener("pointermove", onMove);
@@ -205,11 +258,27 @@ const PlateCanvas = forwardRef<PlateHandle, Props>(function PlateCanvas(props, r
         penCore.position.set(x, y, penZ);
         penHalo.position.set(x, y, penZ);
       }
-      ring.visible = !!p.selection;
-      if (p.selection) {
-        const [x, y] = toPlate(p.selection.x, p.selection.y);
-        ring.position.set(x, y, penZ);
-        ring.scale.setScalar(p.selection.r * PLATE_W);
+      sel.visible = !!p.frame && p.editing;
+      if (p.frame && p.editing) {
+        const f = p.frame;
+        const fp = frameGeo.attributes.position as THREE.BufferAttribute;
+        [...f.corners, f.corners[0]].forEach((c, i) => {
+          const [x, y] = toPlate(c.x, c.y);
+          fp.setXYZ(i, x, y, penZ);
+        });
+        fp.needsUpdate = true;
+        const sp = stemGeo.attributes.position as THREE.BufferAttribute;
+        f.stem.forEach((c, i) => {
+          const [x, y] = toPlate(c.x, c.y);
+          sp.setXYZ(i, x, y, penZ);
+        });
+        sp.needsUpdate = true;
+        f.corners.forEach((c, i) => {
+          const [x, y] = toPlate(c.x, c.y);
+          corners[i].position.set(x, y, penZ);
+        });
+        const [hx, hy] = toPlate(f.handle.x, f.handle.y);
+        rotHandle.position.set(hx, hy, penZ);
       }
       if (!reduced) {
         tilt.x += (tilt.tx - tilt.x) * 0.08;
@@ -229,8 +298,8 @@ const PlateCanvas = forwardRef<PlateHandle, Props>(function PlateCanvas(props, r
       const prevAspect = camera.aspect;
       const rot = plate.group.rotation.clone();
       const lp = light.position.clone();
-      const vis = [penCore.visible, penHalo.visible, ring.visible];
-      penCore.visible = penHalo.visible = ring.visible = false;
+      const vis = [penCore.visible, penHalo.visible, sel.visible];
+      penCore.visible = penHalo.visible = sel.visible = false;
       plate.group.rotation.set(0, 0, 0);
       light.position.copy(DEFAULT_LIGHT);
       renderer.setPixelRatio(1);
@@ -250,7 +319,7 @@ const PlateCanvas = forwardRef<PlateHandle, Props>(function PlateCanvas(props, r
       camera.updateProjectionMatrix();
       plate.group.rotation.copy(rot);
       light.position.copy(lp);
-      [penCore.visible, penHalo.visible, ring.visible] = vis as [boolean, boolean, boolean];
+      [penCore.visible, penHalo.visible, sel.visible] = vis as [boolean, boolean, boolean];
       return out;
     };
 
@@ -265,10 +334,11 @@ const PlateCanvas = forwardRef<PlateHandle, Props>(function PlateCanvas(props, r
       el.removeEventListener("pointercancel", onUp);
       snapRef.current = () => null;
       plate.dispose();
-      [penCore, penHalo, ring].forEach((m) => {
+      for (const m of [penCore, penHalo]) {
         m.geometry.dispose();
         (m.material as THREE.Material).dispose();
-      });
+      }
+      [frameGeo, stemGeo, cornerGeo, rotGeo, lineMat, handleMat].forEach((o) => o.dispose());
       normalTex.dispose();
       env.dispose();
       renderer.dispose();

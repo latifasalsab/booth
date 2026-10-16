@@ -4,16 +4,20 @@ import { KioskDisplay, KioskFooter } from "../KioskPanel";
 
 interface Props {
   error: string | null;
+  busy?: boolean;
+  /** Shown when the detailed analysis is unavailable. */
+  note?: string | null;
   onContinue: () => void;
   onRetake: () => void;
 }
 
-export default function ReviewStep({ error, onContinue, onRetake }: Props) {
+export default function ReviewStep({ error, busy = false, note = null, onContinue, onRetake }: Props) {
   return (
     <>
       <KioskDisplay>
         <h2 className="font-display text-[clamp(26px,2.6vw,36px)] leading-[.95]">Looks good?</h2>
         <p className="mt-2 text-[12px] leading-snug opacity-80">Continue to etch this photo into the plate, or retake it.</p>
+        {note && <p className="notice mt-3">{note}</p>}
         {error && (
           <p role="alert" className="notice mt-3">
             {error}
@@ -21,10 +25,10 @@ export default function ReviewStep({ error, onContinue, onRetake }: Props) {
         )}
       </KioskDisplay>
       <KioskFooter>
-        <SteelButton led={!error} onClick={onContinue} className="flex-1">
-          Looks good? Continue
+        <SteelButton led={!error} disabled={busy} onClick={onContinue} className="flex-1">
+          {busy ? "Reading your face…" : "Looks good? Continue"}
         </SteelButton>
-        <SteelButton variant="ghost" onClick={onRetake}>
+        <SteelButton variant="ghost" disabled={busy} onClick={onRetake}>
           Retake
         </SteelButton>
       </KioskFooter>

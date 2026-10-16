@@ -1,12 +1,13 @@
 "use client";
 /**
- * EDIT: tools (select one, then tap the plate), Size / Depth sliders, Detail, metal swatches,
- * B&W toggle for the printed photo, Undo / Clear / Delete, and the Print key.
+ * EDIT: tools (select one, then tap the plate), Layers (Silhouette, Face, Glasses, Hair & head covering, Tonal relief,
+ * Blank plate / Restore face), the selected element's transform controls (size, rotation, stroke width, text + font,
+ * to front, delete), Undo / Redo / Clear, Size / Depth, Detail, Glasses mode, metal, B&W toggle and the Print key.
  */
 import SteelButton from "../SteelButton";
 import { KioskDisplay, KioskFooter } from "../KioskPanel";
-import type { Detail } from "../../lib/faceStrokes";
-import { unitPolylines, type DecoKind } from "../../lib/heightMap";
+import { FONT_LABEL, scaleLimits, unitPolylines, type Deco, type DecoKind, type FontKey } from "../../lib/elements";
+import type { Detail, GlassesMode, Layers } from "../../lib/faceStrokes";
 import { METALS, type MetalKey } from "../../lib/plateScene";
 
 const TOOLS: { id: DecoKind; label: string }[] = [
@@ -18,9 +19,21 @@ const TOOLS: { id: DecoKind; label: string }[] = [
   { id: "line", label: "Free line" },
 ];
 const DETAILS: { id: Detail; label: string }[] = [
-  { id: "low", label: "Low" },
-  { id: "medium", label: "Medium" },
-  { id: "high", label: "High" },
+  { id: "simple", label: "Simple" },
+  { id: "detailed", label: "Detailed" },
+  { id: "max", label: "Max" },
+];
+const GLASSES: { id: GlassesMode; label: string }[] = [
+  { id: "auto", label: "Auto" },
+  { id: "on", label: "On" },
+  { id: "off", label: "Off" },
+];
+const LAYERS: { id: keyof Layers; label: string }[] = [
+  { id: "silhouette", label: "Silhouette" },
+  { id: "face", label: "Face" },
+  { id: "glasses", label: "Glasses" },
+  { id: "hair", label: "Hair & head covering" },
+  { id: "tonal", label: "Tonal relief" },
 ];
 
 function ToolIcon({ kind }: { kind: DecoKind }) {
@@ -48,34 +61,53 @@ function ToolIcon({ kind }: { kind: DecoKind }) {
 }
 
 interface Props {
+  note?: string | null;
   tool: DecoKind | null;
   onTool: (t: DecoKind | null) => void;
   textValue: string;
   onText: (v: string) => void;
+  textFont: FontKey;
+  /** Selected element, or null. */
+  selected: Deco | null;
+  /** Patch the selected element; key coalesces slider drags into one undo step. */
+  onElement: (patch: Partial<Deco>, key: string) => void;
+  onToFront: () => void;
   size: number;
   onSize: (v: number) => void;
   depth: number;
   onDepth: (v: number) => void;
   detail: Detail;
   onDetail: (d: Detail) => void;
+  glasses: GlassesMode;
+  onGlasses: (g: GlassesMode) => void;
+  layers: Layers;
+  onLayer: (k: keyof Layers, v: boolean) => void;
+  blank: boolean;
+  onBlank: () => void;
+  onRestore: () => void;
   metal: MetalKey;
   onMetal: (m: MetalKey) => void;
   bw: boolean;
   onBw: (v: boolean) => void;
-  hasSelection: boolean;
   canUndo: boolean;
+  canRedo: boolean;
   hasDecos: boolean;
   onDelete: () => void;
   onUndo: () => void;
+  onRedo: () => void;
   onClear: () => void;
   onPrint: () => void;
 }
 
 export default function EditStep(p: Props) {
+  const sel = p.selected;
+  const lim = sel ? scaleLimits(sel) : null;
   return (
     <>
       <KioskDisplay>
         <div className="flex flex-col gap-3.5">
+          {p.note && <p className="notice">{p.note}</p>}
+
           <section aria-label="Tools">
             <div className="flex flex-wrap gap-1.5">
               {TOOLS.map((t) => (
@@ -84,19 +116,92 @@ export default function EditStep(p: Props) {
                 </button>
               ))}
             </div>
-            <p className="mt-1.5 text-[11px] opacity-80">{p.tool ? `Tap the plate to place: ${TOOLS.find((t) => t.id === p.tool)?.label}.` : "Pick a tool, then tap the plate. Tap a mark to select and drag it."}</p>
-            {p.tool === "text" && (
-              <input className="text-field mt-1.5" value={p.textValue} maxLength={10} onChange={(e) => p.onText(e.target.value)} aria-label="Text to place" />
-            )}
-            <div className="mt-2 flex gap-1.5">
-              <button type="button" className="mini" disabled={!p.hasSelection} onClick={p.onDelete}>
-                Delete
-              </button>
+            <p className="mt-1.5 text-[11px] opacity-80">
+              {p.tool ? `Tap the plate to place: ${TOOLS.find((t) => t.id === p.tool)?.label}.` : "Pick a tool, then tap the plate. Tap an element to select it, drag to move."}
+            </p>
+            <div className="mt-2 flex flex-wrap gap-1.5">
               <button type="button" className="mini" disabled={!p.canUndo} onClick={p.onUndo}>
                 Undo
               </button>
+              <button type="button" className="mini" disabled={!p.canRedo} onClick={p.onRedo}>
+                Redo
+              </button>
               <button type="button" className="mini" disabled={!p.hasDecos} onClick={p.onClear}>
                 Clear
+              </button>
+            </div>
+          </section>
+
+          {(sel || p.tool === "text") && (
+            <section aria-label="Element" className="panel-box">
+              {(p.tool === "text" || sel?.kind === "text") && (
+                <>
+                  <input
+                    className="text-field"
+                    value={sel?.kind === "text" ? sel.text ?? "" : p.textValue}
+                    maxLength={12}
+                    onChange={(e) => (sel?.kind === "text" ? p.onElement({ text: e.target.value }, "text") : p.onText(e.target.value))}
+                    aria-label="Text"
+                  />
+                  <div className="seg mt-1.5" role="group" aria-label="Font">
+                    {(Object.keys(FONT_LABEL) as FontKey[]).map((f) => (
+                      <button key={f} type="button" aria-pressed={(sel?.kind === "text" ? sel.font : p.textFont) === f} onClick={() => p.onElement({ font: f }, "font")}>
+                        {FONT_LABEL[f]}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+              {sel && lim && (
+                <>
+                  <label className="mt-2 block text-[11px] font-semibold">
+                    {sel.kind === "text" ? "Font size" : "Element size"} · {Math.round(sel.scale * 100)}%
+                    <input
+                      className="etb-range"
+                      type="range"
+                      min={Math.round(lim.min * 100)}
+                      max={Math.round(lim.max * 100)}
+                      value={Math.round(sel.scale * 100)}
+                      onChange={(e) => p.onElement({ scale: +e.target.value / 100 }, "scale")}
+                    />
+                  </label>
+                  <label className="block text-[11px] font-semibold">
+                    Rotation · {Math.round((sel.rot * 180) / Math.PI)}°
+                    <input className="etb-range" type="range" min={-180} max={180} value={Math.round((sel.rot * 180) / Math.PI)} onChange={(e) => p.onElement({ rot: (+e.target.value * Math.PI) / 180 }, "rot")} />
+                  </label>
+                  {sel.kind === "line" && (
+                    <label className="block text-[11px] font-semibold">
+                      Stroke width · {sel.lw.toFixed(0)}
+                      <input className="etb-range" type="range" min={3} max={16} value={sel.lw} onChange={(e) => p.onElement({ lw: +e.target.value }, "lw")} />
+                    </label>
+                  )}
+                  <div className="mt-1.5 flex gap-1.5">
+                    <button type="button" className="mini" onClick={p.onToFront}>
+                      To front
+                    </button>
+                    <button type="button" className="mini" onClick={p.onDelete}>
+                      Delete
+                    </button>
+                  </div>
+                </>
+              )}
+            </section>
+          )}
+
+          <section aria-label="Layers">
+            <div className="flex flex-wrap gap-1.5">
+              {LAYERS.map((l) => (
+                <button key={l.id} type="button" className="mini" aria-pressed={p.layers[l.id]} onClick={() => p.onLayer(l.id, !p.layers[l.id])}>
+                  {l.label}
+                </button>
+              ))}
+            </div>
+            <div className="mt-1.5 flex gap-1.5">
+              <button type="button" className="mini" disabled={p.blank} onClick={p.onBlank}>
+                Blank plate
+              </button>
+              <button type="button" className="mini" disabled={!p.blank} onClick={p.onRestore}>
+                Restore face
               </button>
             </div>
           </section>
@@ -116,6 +221,17 @@ export default function EditStep(p: Props) {
               {DETAILS.map((d) => (
                 <button key={d.id} type="button" aria-pressed={p.detail === d.id} onClick={() => p.onDetail(d.id)}>
                   {d.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] font-semibold">Glasses</span>
+            <div className="seg" role="group" aria-label="Glasses">
+              {GLASSES.map((g) => (
+                <button key={g.id} type="button" aria-pressed={p.glasses === g.id} onClick={() => p.onGlasses(g.id)}>
+                  {g.label}
                 </button>
               ))}
             </div>

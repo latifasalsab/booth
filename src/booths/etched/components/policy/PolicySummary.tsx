@@ -35,7 +35,7 @@ export default function PolicySummary({ points }: { points: { icon: PolicyIcon; 
             <span className="icon-box">
               <Icon name={p.icon} />
             </span>
-            <p className="font-display text-[clamp(28px,4.2vw,46px)] leading-[1.02]">{p.text}</p>
+            <p className="t-point">{p.text}</p>
           </Reveal>
         </li>
       ))}

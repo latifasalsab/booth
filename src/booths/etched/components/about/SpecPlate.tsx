@@ -29,8 +29,8 @@ export default function SpecPlate() {
             viewport={{ once: true, margin: "-10% 0px" }}
             transition={{ duration: 0.45, delay: i * 0.09, ease: EASE }}
           >
-            <dt className="font-dot text-[12px] tracking-[.18em] text-[#4a4d56]">{r.label}</dt>
-            <dd className="font-dot text-[16px] tracking-[.06em] text-[#23252b] sm:text-[18px]">{r.value}</dd>
+            <dt className="t-label text-[#4a4d56]">{r.label}</dt>
+            <dd className="t-body font-semibold text-[#23252b]">{r.value}</dd>
           </motion.div>
         ))}
       </dl>

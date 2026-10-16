@@ -36,7 +36,7 @@ export default function AboutPage() {
         <DrawLine />
       </div>
       <Reveal className="mx-auto flex max-w-3xl flex-wrap items-center gap-2 px-5 pt-10">
-        <span className="mr-1 font-dot text-[12px] tracking-[.14em] text-muted">{NEXT_LABEL}</span>
+        <span className="t-label mr-1 text-muted">{NEXT_LABEL}</span>
         {upcoming.map((b, i) => (
           <span key={b.slug} className="flex items-center gap-2">
             {i > 0 && <span aria-hidden className="text-muted">·</span>}

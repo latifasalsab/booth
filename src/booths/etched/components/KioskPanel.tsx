@@ -8,13 +8,14 @@ import { useSound } from "@/hooks/SoundContext";
 import Grille from "./Grille";
 import Led from "./Led";
 import Screw from "./Screw";
+import ScrollArea from "./ScrollArea";
 
 const STEP_NAMES = ["Idle", "Camera", "Countdown", "Review", "Etch", "Edit"];
 
 export function KioskDisplay({ children }: { children: ReactNode }) {
   return (
     <div className="kiosk-lcd">
-      <div className="lcd-scroll">{children}</div>
+      <ScrollArea>{children}</ScrollArea>
     </div>
   );
 }

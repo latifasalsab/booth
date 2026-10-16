@@ -17,8 +17,8 @@ export interface SoundMap {
 export interface GrainSettings {
   /** Overrides the theme's --grain-opacity. */
   opacity?: number;
-  /** Set false to hide the vertical grid lines. */
-  grid?: boolean;
+  /** Background pattern: "grid" (vertical lines, default), "stripes" (diagonal, from the booth's --stripes token) or "none". */
+  pattern?: "none" | "grid" | "stripes";
 }
 
 /** Everything a booth declares about itself. Filled in booths/<slug>/config.ts. */
