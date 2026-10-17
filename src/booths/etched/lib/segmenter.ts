@@ -40,7 +40,7 @@ async function create(): Promise<ImageSegmenter | null> {
   }
 }
 
-function getSegmenter(): Promise<ImageSegmenter | null> {
+export function getSegmenter(): Promise<ImageSegmenter | null> {
   if (typeof window === "undefined") return Promise.resolve(null);
   if (!instance) {
     instance = create().then((s) => {

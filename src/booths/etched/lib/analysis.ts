@@ -9,6 +9,7 @@ import type { Landmark } from "./faceStrokes";
 import { HH, HW, WORK_H, WORK_W } from "./heightMap";
 import { CHIN, FACE_OVAL } from "./landmarkIndices";
 import { boxBlur, clamp, percentile } from "./raster";
+import { warmUp } from "./models";
 import { segmentPerson, type ClassMask } from "./segmenter";
 
 /** Soft (0..1) masks at working size. */
@@ -40,6 +41,10 @@ export interface Analysis {
   /** Memoized stroke results keyed by parameters. */
   cache: Map<string, unknown>;
 }
+
+/** If the models are not ready yet, wait this long, then fall back (landmark-free edges, no segmentation). */
+const MODEL_WAIT_MS = 8000;
+const orNull = <T>(p: Promise<T | null>, ms: number): Promise<T | null> => Promise.race([p, new Promise<null>((r) => setTimeout(() => r(null), ms))]);
 
 /** Relief levels: background 0, clothes .08, hair/head covering .14, skin .06 (+ tonal). The gain only makes them readable in the normal map. */
 const RELIEF_GAIN = 1.8;
@@ -82,7 +87,8 @@ function upsampleMasks(cm: ClassMask, W: number, H: number): Masks {
 export async function analyzePhoto(canvas: HTMLCanvasElement): Promise<Analysis> {
   const W = WORK_W;
   const H = WORK_H;
-  const [landmarks, classes] = await Promise.all([detectLandmarks(canvas), segmentPerson(canvas)]);
+  void warmUp(); // no-op when the background warm-up already started
+  const [landmarks, classes] = await Promise.all([orNull(detectLandmarks(canvas), MODEL_WAIT_MS), orNull(segmentPerson(canvas), MODEL_WAIT_MS)]);
 
   const c = document.createElement("canvas");
   c.width = W;

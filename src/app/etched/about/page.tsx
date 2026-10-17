@@ -6,19 +6,30 @@ import fs from "node:fs";
 import path from "node:path";
 import { booths } from "@/booths/registry";
 import DrawLine from "@/components/shared/DrawLine";
+import { PageReady } from "@/components/shared/RouteReady";
 import Reveal from "@/components/shared/Reveal";
 import ScrollProgress from "@/components/shared/ScrollProgress";
 import SmoothScroll from "@/components/shared/SmoothScroll";
-import AboutHero from "@/booths/etched/components/about/AboutHero";
+import dynamic from "next/dynamic";
+import BoothSkeleton from "@/booths/etched/components/BoothSkeleton";
 import MakerNote from "@/booths/etched/components/about/MakerNote";
 import SpecPlate from "@/booths/etched/components/about/SpecPlate";
 import { NEXT_LABEL, PORTRAIT_FILE } from "@/booths/etched/content/about";
+
+const AboutHero = dynamic(() => import("@/booths/etched/components/about/AboutHero"), {
+  loading: () => (
+    <div className="min-h-[60dvh]">
+      <BoothSkeleton label="Warming up the press..." />
+    </div>
+  ),
+});
 
 export default function AboutPage() {
   const hasPortrait = fs.existsSync(path.join(process.cwd(), "public", PORTRAIT_FILE));
   const upcoming = booths.filter((b) => b.status === "soon");
   return (
     <main className="relative pb-24">
+      <PageReady />
       <SmoothScroll />
       <ScrollProgress />
       <AboutHero portraitSrc={hasPortrait ? `/${PORTRAIT_FILE}` : null} />

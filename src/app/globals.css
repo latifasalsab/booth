@@ -77,3 +77,19 @@ body {
 html.lenis, html.lenis body { height: auto; }
 .lenis.lenis-smooth { scroll-behavior: auto !important; }
 .lenis.lenis-stopped { overflow: clip; }
+
+/* Loader (transition curtain and loading.tsx): Doto label, three dots, thin indeterminate line */
+.loader-label { font-family: var(--font-dot, ui-monospace), ui-monospace, monospace; font-size: 12px; letter-spacing: .24em; }
+.loader-dots span { opacity: .25; animation: loader-dot 1.2s ease-in-out infinite; }
+.loader-dots span:nth-child(2) { animation-delay: .15s; }
+.loader-dots span:nth-child(3) { animation-delay: .3s; }
+@keyframes loader-dot { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
+.loader-line { position: relative; width: 160px; height: 1px; overflow: hidden; background: rgb(var(--line) / .14); }
+.loader-line::after { content: ""; position: absolute; inset: 0; width: 40%; background: rgb(var(--accent)); animation: loader-slide 1.4s ease-in-out infinite; }
+@keyframes loader-slide { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+.loader-btn { padding: 6px 14px; border-radius: 9999px; border: 1px solid rgb(var(--line) / .25); font-size: 12px; color: rgb(var(--ink)); transition: background-color 120ms linear; }
+.loader-btn:hover { background: rgb(var(--line) / .1); }
+@media (prefers-reduced-motion: reduce) {
+  .loader-dots span { animation: none; opacity: .7; }
+  .loader-line::after { animation: none; width: 100%; opacity: .5; }
+}

@@ -5,17 +5,20 @@ import { KioskDisplay, KioskFooter } from "../KioskPanel";
 interface Props {
   ready: boolean;
   flip: boolean;
+  /** Models still loading: show the small note. */
+  loadingNote?: boolean;
   onFlip: (v: boolean) => void;
   onCapture: () => void;
   onCancel: () => void;
 }
 
-export default function CameraStep({ ready, flip, onFlip, onCapture, onCancel }: Props) {
+export default function CameraStep({ ready, flip, loadingNote = false, onFlip, onCapture, onCancel }: Props) {
   return (
     <>
       <KioskDisplay>
         <h2 className="font-display text-[clamp(26px,2.6vw,36px)] leading-[.95]">Frame your face</h2>
         <p className="mt-2 text-[12px] leading-snug opacity-80">Fit your head inside the oval, face the light and keep still. A 3-2-1 countdown follows.</p>
+        {loadingNote && <p className="notice mt-3">Loading face analysis...</p>}
         <button type="button" role="switch" aria-checked={flip} className="mini mt-3" onClick={() => onFlip(!flip)}>
           Flip view: {flip ? "on" : "off"}
         </button>

@@ -6,6 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import DrawLine from "@/components/shared/DrawLine";
+import { PageReady } from "@/components/shared/RouteReady";
 import Reveal from "@/components/shared/Reveal";
 import ScrollProgress from "@/components/shared/ScrollProgress";
 import SmoothScroll from "@/components/shared/SmoothScroll";
@@ -19,6 +20,7 @@ export default function PolicyPage() {
   const art = fs.readFileSync(path.join(process.cwd(), "src/booths/etched/content/dots-art.txt"), "utf8");
   return (
     <main className="relative mx-auto max-w-6xl px-5 pb-24 pt-28">
+      <PageReady />
       <SmoothScroll />
       <ScrollProgress />
       <DotsBackdrop art={art} intensity={0.6} />
