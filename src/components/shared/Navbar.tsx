@@ -5,7 +5,7 @@
  * reveal (no spring, no width morph). Esc or an outside click closes it.
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import TransitionLink from "./TransitionLink";
 import { GRAIN_URI } from "./GrainBackground";
 import { useClock } from "@/hooks/useClock";
@@ -55,9 +55,22 @@ export default function Navbar({ name, nav, wordmark }: Props) {
   const [open, setOpen] = useState(false);
   const [tz, setTz] = useState("");
   const pathname = usePathname();
+  const router = useRouter();
   const time = useClock();
   const { enabled, toggle } = useSound();
   const ref = useRef<HTMLDivElement>(null);
+
+  // Warm up the navbar routes when the browser is idle.
+  useEffect(() => {
+    const warm = () => nav.forEach((item) => router.prefetch(item.href));
+    const w = window as Window & { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number; cancelIdleCallback?: (id: number) => void };
+    if (w.requestIdleCallback) {
+      const id = w.requestIdleCallback(warm, { timeout: 3000 });
+      return () => w.cancelIdleCallback?.(id);
+    }
+    const t = window.setTimeout(warm, 1200);
+    return () => window.clearTimeout(t);
+  }, [nav, router]);
 
   useEffect(() => {
     const off = -new Date().getTimezoneOffset() / 60;
