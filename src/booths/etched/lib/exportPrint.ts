@@ -1,7 +1,7 @@
 /**
  * Renders the landscape print (3:2, 1800x1200) to a canvas and downloads it as PNG. Layout mirrors PickupView:
  * 4% margins, two equal columns (photo left, embossed plate right, plate transparent with canvas shadows), a small
- * wordmark centered in the bottom band, and a static glossy finish (soft sheen, edge highlight, paper curl).
+ * wordmark centered in the bottom band, and a barely-there static sheen (alpha .07) on clean near-white paper.
  * Keep the geometry in sync with the .print-* rules in theme.css.
  */
 export const PRINT_W = 1800;
@@ -119,24 +119,8 @@ async function drawWordmark(ctx: CanvasRenderingContext2D, family: string) {
   each((ch, x) => ctx.strokeText(ch, x, WORD_BASE));
 }
 
-/** Static glossy finish: paper curl shadow, inner edge highlight, soft diagonal sheen (alpha <= .18). */
+/** Static sheen: one soft, narrow diagonal band, alpha .07 (no edge highlight, no paper curl). */
 function drawFinish(ctx: CanvasRenderingContext2D) {
-  const edge = (x0: number, y0: number, x1: number, y1: number, a: number, rect: [number, number, number, number]) => {
-    const g = ctx.createLinearGradient(x0, y0, x1, y1);
-    g.addColorStop(0, `rgba(0,0,0,${a})`);
-    g.addColorStop(1, "rgba(0,0,0,0)");
-    ctx.fillStyle = g;
-    ctx.fillRect(...rect);
-  };
-  edge(0, 0, 63, 0, 0.05, [0, 0, 63, PRINT_H]);
-  edge(PRINT_W, 0, PRINT_W - 63, 0, 0.06, [PRINT_W - 63, 0, 63, PRINT_H]);
-  edge(0, 0, 0, 48, 0.035, [0, 0, PRINT_W, 48]);
-  edge(0, PRINT_H, 0, PRINT_H - 57, 0.05, [0, PRINT_H - 57, PRINT_W, 57]);
-
-  ctx.strokeStyle = "rgba(255,255,255,.7)";
-  ctx.lineWidth = 2;
-  ctx.strokeRect(1, 1, PRINT_W - 2, PRINT_H - 2);
-
   const a = (115 * Math.PI) / 180;
   const dx = Math.sin(a);
   const dy = -Math.cos(a);
@@ -144,9 +128,9 @@ function drawFinish(ctx: CanvasRenderingContext2D) {
   const cx = PRINT_W / 2;
   const cy = PRINT_H / 2;
   const g = ctx.createLinearGradient(cx - (dx * L) / 2, cy - (dy * L) / 2, cx + (dx * L) / 2, cy + (dy * L) / 2);
-  g.addColorStop(0.15, "rgba(255,255,255,0)");
-  g.addColorStop(0.25, "rgba(255,255,255,.18)");
-  g.addColorStop(0.35, "rgba(255,255,255,0)");
+  g.addColorStop(0.18, "rgba(255,255,255,0)");
+  g.addColorStop(0.25, "rgba(255,255,255,.07)");
+  g.addColorStop(0.32, "rgba(255,255,255,0)");
   ctx.save();
   ctx.globalCompositeOperation = "screen";
   ctx.fillStyle = g;
@@ -160,7 +144,7 @@ export async function renderPrint(o: PrintOptions): Promise<HTMLCanvasElement> {
   c.height = PRINT_H;
   const ctx = c.getContext("2d");
   if (!ctx) throw new Error("Canvas unavailable");
-  ctx.fillStyle = "#f8f6f1";
+  ctx.fillStyle = "#fafaf8";
   ctx.fillRect(0, 0, PRINT_W, PRINT_H);
 
   const img = await loadImage(o.photoUrl);
