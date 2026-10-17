@@ -4,7 +4,9 @@
  * brushed + scratched roughness map, procedural gradient environment, normal map rebuilt from the height canvas
  * whenever versionRef changes, light steered by pointer/tilt. The CSS drop-shadow on the canvas (class etb-shadow)
  * makes it look like a physical plate resting on the page. snapshot() renders a tight, transparent-background image for the print.
- * In EDIT it also draws the selected element's frame (corner handles + rotate handle) and reports pointer gestures
+ * While a pointer is down on the plate (dragging, scaling or rotating an element) the pointer-following light eases to a
+ * neutral top-left position (~200ms) and ignores the pointer until release, then eases back (~400ms); the tilt holds still.
+ * In EDIT it also draws the selected element's frame (1px line, small handles, no glow) and reports pointer gestures
  * on the plate surface: down / move / up, and two-finger pinchStart / pinch (scale, rotation) / pinchEnd.
  * Orientation: canvas row 0 is the top of the plate and column 0 its left (texture flipY = true), uv.y is flipped back
  * when picking, so left and right never swap.
@@ -44,6 +46,8 @@ interface Props {
   frame: Frame | null;
   editing: boolean;
   onSurface?: (e: SurfaceEvent) => void;
+  /** Called once, after the first rendered frame (or when WebGL is unavailable): lets the route be revealed. */
+  onFirstFrame?: () => void;
   className?: string;
 }
 
@@ -67,6 +71,7 @@ const PlateCanvas = forwardRef<PlateHandle, Props>(function PlateCanvas(props, r
       renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
     } catch {
       setFailed(true);
+      propsRef.current.onFirstFrame?.();
       return;
     }
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -111,14 +116,14 @@ const PlateCanvas = forwardRef<PlateHandle, Props>(function PlateCanvas(props, r
       new THREE.SphereGeometry(0.1, 16, 16),
       new THREE.MeshBasicMaterial({ color: 0xd3fb43, transparent: true, opacity: 0.3, depthWrite: false, blending: THREE.AdditiveBlending }),
     );
-    const lineMat = new THREE.LineBasicMaterial({ color: 0xd3fb43, depthTest: false, transparent: true });
+    const lineMat = new THREE.LineBasicMaterial({ color: 0xd3fb43, depthTest: false });
     const handleMat = new THREE.MeshBasicMaterial({ color: 0xd3fb43, depthTest: false });
     const frameGeo = new THREE.BufferGeometry();
     frameGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(5 * 3), 3));
     const stemGeo = new THREE.BufferGeometry();
     stemGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(2 * 3), 3));
-    const cornerGeo = new THREE.PlaneGeometry(0.06, 0.06);
-    const rotGeo = new THREE.CircleGeometry(0.035, 24);
+    const cornerGeo = new THREE.PlaneGeometry(0.04, 0.04);
+    const rotGeo = new THREE.CircleGeometry(0.024, 24);
     const frameLine = new THREE.Line(frameGeo, lineMat);
     const stemLine = new THREE.Line(stemGeo, lineMat);
     const corners = Array.from({ length: 4 }, () => new THREE.Mesh(cornerGeo, handleMat));
@@ -174,6 +179,7 @@ const PlateCanvas = forwardRef<PlateHandle, Props>(function PlateCanvas(props, r
       return h && h.uv ? { x: h.uv.x, y: 1 - h.uv.y } : null;
     };
     const pointers = new Map<number, { x: number; y: number }>();
+    let frozen = false; // pointer down on the plate: light and tilt stop following the pointer
     let down = false;
     let pinch: { d0: number; a0: number } | null = null;
     const pair = () => {
@@ -185,6 +191,7 @@ const PlateCanvas = forwardRef<PlateHandle, Props>(function PlateCanvas(props, r
       const p = propsRef.current;
       if (!p.editing || !p.onSurface) return;
       pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      frozen = true;
       el.setPointerCapture(e.pointerId);
       if (pointers.size === 2) {
         if (down) {
@@ -216,6 +223,7 @@ const PlateCanvas = forwardRef<PlateHandle, Props>(function PlateCanvas(props, r
     };
     const onUp = (e: PointerEvent) => {
       if (!pointers.delete(e.pointerId)) return;
+      if (pointers.size === 0) frozen = false;
       if (pinch) {
         if (pointers.size < 2) {
           pinch = null;
@@ -236,9 +244,14 @@ const PlateCanvas = forwardRef<PlateHandle, Props>(function PlateCanvas(props, r
 
     let lastMetal: MetalKey | null = null;
     let lastVersion = -1;
+    let firstFrame = false;
     let raf = 0;
+    let lastT = performance.now();
     const tick = () => {
       raf = requestAnimationFrame(tick);
+      const now = performance.now();
+      const dt = Math.min(64, now - lastT);
+      lastT = now;
       const p = propsRef.current;
       if (p.metal !== lastMetal) {
         plate.setMetal(p.metal);
@@ -280,14 +293,19 @@ const PlateCanvas = forwardRef<PlateHandle, Props>(function PlateCanvas(props, r
         const [hx, hy] = toPlate(f.handle.x, f.handle.y);
         rotHandle.position.set(hx, hy, penZ);
       }
-      if (!reduced) {
+      if (!reduced && !frozen) {
         tilt.x += (tilt.tx - tilt.x) * 0.08;
         tilt.y += (tilt.ty - tilt.y) * 0.08;
         const k = p.editing ? 0.4 : 1;
         plate.group.rotation.set(-tilt.y * 0.1 * k, tilt.x * 0.14 * k, 0);
       }
-      light.position.lerp(lightTarget, 0.12);
+      // neutral while the user edits (about 200ms to settle), back to the pointer after release (about 400ms)
+      light.position.lerp(frozen ? DEFAULT_LIGHT : lightTarget, 1 - Math.exp(-dt / (frozen ? 70 : 130)));
       renderer.render(scene, camera);
+      if (!firstFrame) {
+        firstFrame = true;
+        propsRef.current.onFirstFrame?.();
+      }
     };
     tick();
 
