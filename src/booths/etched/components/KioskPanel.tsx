@@ -27,10 +27,12 @@ export function KioskFooter({ children }: { children: ReactNode }) {
 interface Props {
   stepIndex: number;
   label: string;
+  /** false while the models warm up: the idle LED stays dark until it turns lime. */
+  ready?: boolean;
   children: ReactNode;
 }
 
-export default function KioskPanel({ stepIndex, label, children }: Props) {
+export default function KioskPanel({ stepIndex, label, ready = true, children }: Props) {
   const { enabled, toggle } = useSound();
   return (
     <div className="kiosk-screen relative flex h-full flex-col">
@@ -42,7 +44,7 @@ export default function KioskPanel({ stepIndex, label, children }: Props) {
       <header className="kiosk-head">
         <div className="flex items-center gap-2" role="list" aria-label={`Step ${stepIndex + 1} of ${STEP_NAMES.length}: ${STEP_NAMES[stepIndex]}`}>
           {STEP_NAMES.map((n, i) => (
-            <Led key={n} on={i === stepIndex} label={n} />
+            <Led key={n} on={i === stepIndex && (i !== 0 || ready)} label={n} />
           ))}
         </div>
         <span className="min-w-0 truncate font-dot text-[11px] tracking-[.14em]" aria-live="polite">

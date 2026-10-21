@@ -11,9 +11,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useReducedMotion } from "framer-motion";
 import type { SoundMap } from "@/types";
-import { useCurtain } from "@/components/shared/PageCurtain";
+import { useReadyGate, useTransitions } from "@/components/shared/TransitionProvider";
 import { cropToPortrait, useCamera } from "../hooks/useCamera";
 import { useEmbossProgress } from "../hooks/useEmbossProgress";
+import { ModelsProvider, useModels } from "../hooks/useModels";
 import { analyzePhoto, type Analysis } from "../lib/analysis";
 import { clampDeco, decoFrame, hitHandle, hitTest, lineDeco, makeDeco, normAngle, setDecoFonts, type Deco, type DecoKind, type FontKey } from "../lib/elements";
 import { buildPortrait, DEFAULT_LAYERS, DEFAULT_SETTINGS, MODE_NOTE, sampleFaceStrokes, type Detail, type GlassesMode, type Layers, type Portrait, type PortraitSettings } from "../lib/faceStrokes";
@@ -68,8 +69,12 @@ function logDetections(p: Portrait) {
   ]);
 }
 
-export default function EtchedBooth({ sound }: { sound: SoundMap }) {
-  const curtain = useCurtain();
+function EtchedBoothInner({ sound }: { sound: SoundMap }) {
+  const curtain = useTransitions();
+  const models = useModels();
+  const warming = models.overall === "loading";
+  const [plateReady, setPlateReady] = useState(false);
+  useReadyGate(plateReady); // /etched is revealed only after the plate has rendered its first frame
   const reduced = useReducedMotion();
   const { videoRef, status: camStatus, start: camStart, stop: camStop, capture: camCapture } = useCamera();
 
@@ -627,6 +632,7 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
                 frame={frame}
                 editing={step === "EDIT"}
                 onSurface={step === "EDIT" ? onSurface : undefined}
+                onFirstFrame={() => setPlateReady(true)}
               />
             </div>
             {showMedia && (
@@ -647,11 +653,11 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
         </section>
 
         <aside className="h-[46dvh] shrink-0 p-2 lg:h-dvh lg:w-[calc(clamp(320px,30vw,440px)+16px)] lg:p-4 lg:pl-0" style={{ paddingBottom: "max(8px, env(safe-area-inset-bottom))" }}>
-          <KioskPanel stepIndex={panelIndex} label={LABELS[step]}>
+          <KioskPanel stepIndex={panelIndex} label={step === "IDLE" && warming ? "WARMING UP" : LABELS[step]} ready={!(step === "IDLE" && warming)}>
             {step === "IDLE" && <IdleStep plates={plates} notice={notice} onStart={startCamera} onUpload={onUpload} />}
-            {step === "CAMERA" && <CameraStep ready={camStatus === "live"} flip={flip} onFlip={setFlip} onCapture={takePhoto} onCancel={cancelCamera} />}
+            {step === "CAMERA" && <CameraStep ready={camStatus === "live"} loadingNote={warming} flip={flip} onFlip={setFlip} onCapture={takePhoto} onCancel={cancelCamera} />}
             {step === "COUNTDOWN" && <CountdownStep count={count} />}
-            {step === "REVIEW" && <ReviewStep error={error} note={modeNote} busy={analyzing} onContinue={continueToEtch} onRetake={startCamera} />}
+            {step === "REVIEW" && <ReviewStep error={error} note={modeNote} loadingNote={warming} busy={analyzing} onContinue={continueToEtch} onRetake={startCamera} />}
             {step === "ETCH" && <EtchStep progress={uiProgress} />}
             {(step === "EDIT" || step === "PRINT") && (
               <EditStep
@@ -697,5 +703,13 @@ export default function EtchedBooth({ sound }: { sound: SoundMap }) {
 
       {step === "PRINT" && print && <PickupView photoUrl={print.photoUrl} plate={print.plate} bw={bw} onAgain={again} />}
     </main>
+  );
+}
+
+export default function EtchedBooth(props: { sound: SoundMap }) {
+  return (
+    <ModelsProvider>
+      <EtchedBoothInner {...props} />
+    </ModelsProvider>
   );
 }

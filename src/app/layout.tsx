@@ -1,7 +1,7 @@
 /** Root layout: html/body only. Booths style themselves through their own layout + BoothShell. */
 import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
-import { CurtainProvider } from "@/components/shared/PageCurtain";
+import { TransitionProvider } from "@/components/shared/TransitionProvider";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -20,7 +20,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
       <body>
-        <CurtainProvider>{children}</CurtainProvider>
+        <TransitionProvider>{children}</TransitionProvider>
       </body>
     </html>
   );

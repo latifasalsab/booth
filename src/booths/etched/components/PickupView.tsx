@@ -1,14 +1,16 @@
 "use client";
 /**
- * PRINT: steel pickup screen. The group (label, slot, print) is centered in the viewport. The glossy landscape print
- * starts fully hidden INSIDE the black mouth of the slot and slides down out of it: slot at the bottom, paper above it
- * but clipped at the mouth's vertical center line (so it passes over the lower lip), a soft dark gradient at the mouth's
- * top edge over the paper. It comes to rest 6px below the mouth's lower edge with a soft contact shadow. The images are
- * revealed by a top-to-bottom wipe synchronized with the paper (faint 2px print-head line, brightness 70% -> 100%).
- * When the animation ends everything STAYS as is; Save photo and Again appear below. Calm easing, no bounce.
+ * PRINT: steel pickup screen. The group (label, slot, print) is centered in the viewport. The landscape print starts
+ * fully hidden INSIDE the black mouth of the slot and slides down out of it: slot at the bottom, paper above it but
+ * clipped at the mouth's vertical center line and to the slot's inner width (nothing can render outside the slot; no
+ * overlay gradients or wrapper shadows). It comes to rest 6px below the mouth's lower edge. The images are revealed by a
+ * top-to-bottom wipe synchronized with the paper (faint 2px print-head line, brightness 70% -> 100%). The paper's subtle
+ * shadow and the faint sheen fade in only AFTER the paper has fully emerged. When the animation ends everything STAYS as
+ * is; Save photo and Again appear below. Calm easing, no bounce.
  */
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { animate, motion, useAnimationControls, useMotionValue, useReducedMotion, useTransform } from "framer-motion";
+import { useReadyGate } from "@/components/shared/TransitionProvider";
 import { measureFont, savePrint, type FontMetrics } from "../lib/exportPrint";
 import SteelButton from "./SteelButton";
 import Wordmark from "./Wordmark";
@@ -36,6 +38,12 @@ export default function PickupView({ photoUrl, plate, bw, onAgain }: Props) {
   const reducedRef = useRef(reduced);
   reducedRef.current = reduced;
   const plateUrl = useMemo(() => plate.toDataURL("image/png"), [plate]);
+  // hold the transition reveal until both images are decoded
+  const decoded = useMemo(
+    () => (typeof window === "undefined" ? true : Promise.all([photoUrl, plateUrl].map((u) => { const i = new Image(); i.src = u; return i.decode().catch(() => undefined); }))),
+    [photoUrl, plateUrl],
+  );
+  useReadyGate(decoded);
   const printCtl = useAnimationControls();
   const reveal = useMotionValue(0); // 0..1: how much of the print has been printed (top to bottom)
   const clipPath = useTransform(reveal, (v) => `inset(0 0 ${((1 - v) * 100).toFixed(2)}% 0)`);
@@ -45,7 +53,6 @@ export default function PickupView({ photoUrl, plate, bw, onAgain }: Props) {
   const printRef = useRef<HTMLDivElement>(null);
   const wordRef = useRef<HTMLDivElement>(null);
   const sheenRef = useRef<HTMLDivElement>(null);
-  const [clipOpen, setClipOpen] = useState(false);
   const [done, setDone] = useState(false);
   const [saving, setSaving] = useState(false);
   const [fm, setFm] = useState<FontMetrics>({ cap: 0.72, asc: 1.1, desc: 0.3 });
@@ -73,7 +80,6 @@ export default function PickupView({ photoUrl, plate, bw, onAgain }: Props) {
         printCtl.set({ y: REST_Y, opacity: 0 });
         await printCtl.start({ opacity: 1, transition: { duration: 0.3 } });
         if (!alive) return;
-        setClipOpen(true);
         setDone(true);
         return;
       }
@@ -86,7 +92,6 @@ export default function PickupView({ photoUrl, plate, bw, onAgain }: Props) {
       wipe = w;
       await Promise.all([slide, w]);
       if (!alive) return;
-      setClipOpen(true);
       setDone(true);
     })();
     return () => {
@@ -137,7 +142,7 @@ export default function PickupView({ photoUrl, plate, bw, onAgain }: Props) {
 
   const wordSize = CAP_CQW / fm.cap;
   const wordTop = WORD_CENTER_CQW - wordSize * ((1 - (fm.asc + fm.desc)) / 2 + fm.asc - fm.cap / 2);
-  const clipW = "calc(var(--paper-w) + 80px)";
+  const clipW = "calc(var(--paper-w) + 24px)"; // the mouth's inner width (slot minus its 11px lips)
 
   return (
     <div className="pickup-bg fixed inset-0 z-40 overflow-hidden" style={{ "--paper-w": PAPER_W, "--slot-w": "calc(var(--paper-w) + 46px)" } as CSSProperties}>
@@ -162,12 +167,12 @@ export default function PickupView({ photoUrl, plate, bw, onAgain }: Props) {
               width: clipW,
               marginLeft: `calc(${clipW} / -2)`,
               height: `calc(var(--paper-w) / 1.5 + ${REST_Y + 40}px)`,
-              overflow: clipOpen ? "visible" : "hidden",
+              clipPath: "inset(0 0 -40px 0)", // top = the mouth's center line, sides = the slot's inner width, room below for the shadow
               pointerEvents: "none",
             }}
           >
-            <motion.div ref={printRef} initial={{ opacity: 0 }} animate={printCtl} className="print-paper absolute top-0" style={{ left: 40, width: "var(--paper-w)", aspectRatio: "3 / 2", pointerEvents: "auto" }}>
-              <div className="print-contact" aria-hidden />
+            <motion.div ref={printRef} initial={{ opacity: 0 }} animate={printCtl} className="print-paper absolute top-0" style={{ left: 12, width: "var(--paper-w)", aspectRatio: "3 / 2", pointerEvents: "auto" }}>
+              <div className="print-shadow" data-on={done} aria-hidden />
               <motion.div className="print-ink" style={{ clipPath }}>
                 <motion.div className="print-images" style={{ filter: imageFilter }}>
                   {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -179,13 +184,11 @@ export default function PickupView({ photoUrl, plate, bw, onAgain }: Props) {
                   <Wordmark size="inherit" style={{ fontSize: `${wordSize}cqw`, letterSpacing: ".06em", lineHeight: 1 }} />
                 </div>
               </motion.div>
-              <div className="print-finish" aria-hidden />
-              <div className="print-sheen-clip" aria-hidden>
+              <div className="print-sheen-clip" data-on={done} aria-hidden>
                 <div ref={sheenRef} className="print-sheen" />
               </div>
               <motion.div className="print-head" aria-hidden style={{ top: headTop, opacity: headOpacity }} />
             </motion.div>
-            <div className="mouth-shade" aria-hidden />
           </div>
         </div>
       </div>
